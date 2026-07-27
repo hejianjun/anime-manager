@@ -6,11 +6,45 @@
 
 - 扫描本地媒体目录，使用 BLAKE2b-256 内容哈希识别改名文件。
 - 从文件名解析作品标题与集号，并按目录和作品标题分组。
-- 使用 AniDB 官方标题库进行本地候选搜索，确认后通过 HTTP XML API 获取详情。
+- 使用 AniDB 官方标题库进行本地候选搜索，支持英文、日文、罗马字等别名匹配，候选统一优先显示日文标题。
+- 确认候选后通过 AniDB HTTP XML API 获取详情，作品主标题按日文、AniDB 主标题、英文的顺序回退。
 - 提供带明显“模拟”标识的 DMM、Getchu 演示适配器。
 - 每个来源独立选择候选，永久保存外部 ID 和字段来源。
 - 生成 Jellyfin 优先的 `tvshow.nfo`、剧集 NFO 或 `movie.nfo`。
 - 写入前展示差异；覆盖时自动保留时间戳备份。
+
+## 数据流
+
+```mermaid
+flowchart LR
+    FS[媒体目录] -->|扫描文件| SCAN[扫描与文件名解析]
+    SCAN -->|路径、哈希、标题、集号| MF[(media_file)]
+    SCAN -->|按目录和标题聚合| MG[(match_group)]
+
+    DUMP[AniDB 标题库] -->|定期下载并展开多语言标题| AT[(anidb_title)]
+    MG -->|搜索关键词| MATCH[本地模糊匹配]
+    AT -->|全部语言和别名参与评分| MATCH
+    MATCH -->|日文优先展示候选| CAND[(scrape_candidate)]
+
+    USER[用户] -->|选择候选并确认| CAND
+    CAND --> CONFIRM[确认绑定]
+    CONFIRM -->|作品元数据| ANIME[(anime)]
+    CONFIRM -->|外部来源 ID| MAP[(source_mapping)]
+    CONFIRM -->|设置 anime_id| MF
+    CONFIRM -->|设置 anime_id 和 confirmed| MG
+
+    API[AniDB HTTP XML API] -->|详情响应| SNAP[(source_snapshot)]
+    MAP -->|按来源 ID 获取或刷新| API
+    SNAP -->|标准化元数据| ANIME
+    AT -->|按语言策略重选标题| ANIME
+
+    USER -->|手工修正集号| MF
+    ANIME --> EXPORT[导出预览]
+    MF -->|每个文件的 episode| EXPORT
+    EXPORT -->|用户确认写入| NFO[tvshow.nfo / 剧集 NFO / movie.nfo]
+```
+
+`anime` 保存作品级元数据，例如标题、年份、类型和总集数；`media_file` 每行对应一个实际媒体文件，通过 `anime_id` 绑定作品，并在 `episode` 字段保存该文件的集号。总集数 `anime.episode_count` 与单文件集号 `media_file.episode` 是两个独立字段。当前可在作品详情中修改单个文件的集号。
 
 ## Windows 启动
 
@@ -33,6 +67,27 @@
 
 项目不抓取 AniDB 网页，并把详情请求限制为至少 2 秒一次、同一 AID 当日复用缓存。
 
+### 标题库与语言策略
+
+AniDB 标题库中一部动画可以有多个标题。程序会将每个标题分别存入 `anidb_title` 表，并通过相同的 AniDB AID 关联：
+
+| 字段 | 内容 |
+| --- | --- |
+| `aid` | AniDB 动画 ID，同一作品的标题共享该 ID |
+| `title` | 原始标题文本 |
+| `normalized_title` | 用于本地模糊匹配的标准化标题 |
+| `language` | AniDB 语言代码，例如 `ja`、`x-jat`、`en` |
+| `title_type` | 标题类型，例如 `main`、`official`、`synonym` |
+
+搜索时，所有语言和别名都会参与相似度计算，因此仍可用英文或罗马字搜索；确定匹配的 AID 后，候选标题按以下顺序显示：
+
+1. 日文标题（`ja`）
+2. AniDB 罗马字主标题（`x-jat`）
+3. 英文标题（`en`）
+4. 其他语言标题
+
+确认并获取详情后，作品主标题使用“日文官方标题 > 其他日文标题 > AniDB 主标题 > 英文标题”的回退顺序。`original_title` 同样优先保存日文标题。已有作品可在详情中点击“刷新元数据”应用当前标题策略；即使 AniDB 详情命中一天内的缓存，标题也会重新按本地标题库的语言优先级选择。
+
 ## 开发验证
 
 ```powershell
@@ -43,4 +98,3 @@ npm run build
 ```
 
 数据库迁移文件位于 `backend/alembic`，默认数据文件是 `backend/data/anime.db`。
-

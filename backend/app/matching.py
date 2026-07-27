@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import asdict
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, select, tuple_
 from sqlalchemy.orm import Session
 
 from .errors import AppError
@@ -116,6 +116,25 @@ async def confirm_group(db: Session, group: MatchGroup) -> Anime:
         raise AppError("NO_SELECTION", "请至少选择一个候选结果")
     anidb = next((item for item in selected if item.source == "anidb"), None)
     anime = db.get(Anime, group.anime_id) if group.anime_id else None
+    mapped_anime_ids = set(
+        db.scalars(
+            select(SourceMapping.anime_id).where(
+                tuple_(SourceMapping.source, SourceMapping.source_id).in_(
+                    [(item.source, item.source_id) for item in selected]
+                )
+            )
+        ).all()
+    )
+    if anime:
+        mapped_anime_ids.discard(anime.id)
+    if mapped_anime_ids:
+        if anime or len(mapped_anime_ids) > 1:
+            raise AppError(
+                "SOURCES_BOUND_TO_DIFFERENT_ANIME",
+                "选择的来源候选已绑定到不同作品，请调整选择",
+                status_code=409,
+            )
+        anime = db.get(Anime, mapped_anime_ids.pop())
     if not anime:
         anime = Anime(title=(anidb or selected[0]).title)
         db.add(anime)
@@ -187,4 +206,3 @@ async def refresh_anime(db: Session, anime: Anime) -> Anime:
     db.commit()
     db.refresh(anime)
     return anime
-

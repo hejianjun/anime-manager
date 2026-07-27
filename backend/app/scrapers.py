@@ -24,6 +24,7 @@ from .parser import normalize_title
 
 TITLE_DUMP_URL = "https://anidb.net/api/anime-titles.xml.gz"
 DETAIL_URL = "http://api.anidb.net:9001/httpapi"
+XML_LANG = "{http://www.w3.org/XML/1998/namespace}lang"
 
 
 @dataclass
@@ -76,6 +77,50 @@ class Scraper(ABC):
 def get_setting(db: Session, key: str, default: Any = None) -> Any:
     row = db.get(AppSetting, key)
     return row.value if row else default
+
+
+def _title_display_priority(title: AniDBTitle) -> tuple[int, int]:
+    language_priority = {"ja": 0, "x-jat": 1, "en": 2}.get(title.language, 3)
+    type_priority = {"official": 0, "main": 1}.get(title.title_type, 2)
+    return language_priority, type_priority
+
+
+def _preferred_stored_titles(db: Session, aid: int) -> tuple[str | None, str | None]:
+    titles = db.scalars(select(AniDBTitle).where(AniDBTitle.aid == aid)).all()
+
+    def find(*, language: str | None = None, title_type: str | None = None) -> str | None:
+        return next(
+            (
+                item.title
+                for item in titles
+                if (language is None or item.language == language)
+                and (title_type is None or item.title_type == title_type)
+            ),
+            None,
+        )
+
+    japanese = find(language="ja", title_type="official") or find(language="ja")
+    main = find(title_type="main")
+    english = find(language="en", title_type="official") or find(language="en")
+    return japanese or main or english, japanese or main
+
+
+def _preferred_detail_titles(titles: list[etree._Element]) -> tuple[str | None, str | None]:
+    def find(*, language: str | None = None, title_type: str | None = None) -> str | None:
+        return next(
+            (
+                item.text
+                for item in titles
+                if (language is None or item.attrib.get(XML_LANG) == language)
+                and (title_type is None or item.attrib.get("type") == title_type)
+            ),
+            None,
+        )
+
+    japanese = find(language="ja", title_type="official") or find(language="ja")
+    main = find(title_type="main")
+    english = find(language="en", title_type="official") or find(language="en")
+    return japanese or main or english, japanese or main
 
 
 class AniDBScraper(Scraper):
@@ -160,13 +205,23 @@ class AniDBScraper(Scraper):
             current = best.get(title.aid)
             if current is None or score > current[1]:
                 best[title.aid] = (title, score)
+        display_titles: dict[int, AniDBTitle] = {}
+        if best:
+            for title in db.scalars(select(AniDBTitle).where(AniDBTitle.aid.in_(best))).all():
+                current = display_titles.get(title.aid)
+                if current is None or _title_display_priority(title) < _title_display_priority(current):
+                    display_titles[title.aid] = title
         return [
             Candidate(
                 source=self.source,
                 source_id=str(item.aid),
-                title=item.title,
+                title=display_titles.get(item.aid, item).title,
                 score=round(score, 4),
-                payload={"language": item.language, "title_type": item.title_type},
+                payload={
+                    "language": display_titles.get(item.aid, item).language,
+                    "title_type": display_titles.get(item.aid, item).title_type,
+                    "matched_title": item.title,
+                },
             )
             for item, score in sorted(best.values(), key=lambda pair: pair[1], reverse=True)[:20]
             if score >= 0.35
@@ -186,7 +241,13 @@ class AniDBScraper(Scraper):
         else:
             fetched_at = None
         if cached and fetched_at and datetime.now(timezone.utc) - fetched_at < timedelta(days=1):
-            return SourceMetadata(**cached.normalized_payload)
+            metadata = SourceMetadata(**cached.normalized_payload)
+            title, original_title = _preferred_stored_titles(db, int(source_id))
+            if title:
+                metadata.title = title
+                metadata.original_title = original_title
+                cached.normalized_payload = asdict(metadata)
+            return metadata
         client_name = get_setting(db, "anidb_client")
         client_ver = get_setting(db, "anidb_clientver")
         if not client_name or not client_ver:
@@ -232,33 +293,14 @@ class AniDBScraper(Scraper):
                 retryable=(root.text or "").lower() not in {"banned"},
                 status_code=502,
             )
-        titles = root.findall("./titles/title")
-        main = next((item.text for item in titles if item.attrib.get("type") == "main"), None)
-        english = next(
-            (
-                item.text
-                for item in titles
-                if item.attrib.get("type") == "official"
-                and item.attrib.get("{http://www.w3.org/XML/1998/namespace}lang") == "en"
-            ),
-            None,
-        )
-        japanese = next(
-            (
-                item.text
-                for item in titles
-                if item.attrib.get("type") == "official"
-                and item.attrib.get("{http://www.w3.org/XML/1998/namespace}lang") == "ja"
-            ),
-            None,
-        )
+        title, original_title = _preferred_detail_titles(root.findall("./titles/title"))
         start_date = root.findtext("startdate")
         picture = root.findtext("picture")
         metadata = SourceMetadata(
             source=self.source,
             source_id=source_id,
-            title=english or main or japanese or f"AniDB {source_id}",
-            original_title=japanese or main,
+            title=title or f"AniDB {source_id}",
+            original_title=original_title,
             description=(root.findtext("description") or "").strip() or None,
             year=int(start_date[:4]) if start_date and re.match(r"^\d{4}", start_date) else None,
             media_type=root.findtext("type"),

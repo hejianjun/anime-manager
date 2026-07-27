@@ -26,6 +26,7 @@ async function refresh() {
   busy.value = true
   try {
     selected.value = (await api.post(`/anime/${selected.value.id}/refresh`)).data
+    await load()
     ElMessage.success('元数据已刷新')
   } catch (error) { ElMessage.error((error as Error).message) }
   finally { busy.value = false }
