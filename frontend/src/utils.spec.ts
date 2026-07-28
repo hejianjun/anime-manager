@@ -70,6 +70,11 @@ const anime = (episodeCount: number | null, files: MediaFile[]): Anime => ({
   genres: [],
   tags: [],
   field_provenance: {},
+  catalog_health: {
+    directory_name_mismatch: false,
+    missing_nfo_count: 0,
+    missing_episode_image_count: 0,
+  },
   mappings: [],
   files,
   updated_at: '2026-07-28T00:00:00Z',

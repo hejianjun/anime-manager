@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -12,7 +13,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from .errors import AppError
-from .models import LibraryRoot, MatchGroup, MediaFile, TaskRecord
+from .models import Anime, LibraryRoot, MatchGroup, MediaFile, TaskRecord
 from .parser import parse_filename
 
 VIDEO_EXTENSIONS = {".mkv", ".mp4", ".avi", ".mov", ".wmv", ".m4v", ".ts", ".webm"}
@@ -21,6 +22,47 @@ FOLDER_YEAR = re.compile(
     r"(?<!\d)(?:19|20)\d{2}(?!\d)"
 )
 EMPTY_BRACKETS = re.compile(r"[\(\[\{（【]\s*[\)\]\}）】]")
+EPISODE_IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp"}
+
+
+def _directory_entries(path: Path, cache: dict[Path, set[str]]) -> set[str]:
+    directory = path.parent
+    if directory not in cache:
+        try:
+            cache[directory] = {
+                item.name.casefold()
+                for item in directory.iterdir()
+                if item.is_file()
+            }
+        except OSError:
+            cache[directory] = set()
+    return cache[directory]
+
+
+def _has_episode_image(path: Path, entries: set[str]) -> bool:
+    stem = path.stem.casefold()
+    return any(
+        f"{stem}{suffix}{extension}" in entries
+        for suffix in ("", "-thumb")
+        for extension in EPISODE_IMAGE_EXTENSIONS
+    )
+
+
+def update_catalog_sidecar_health(db: Session, directory_cache: dict[Path, set[str]]) -> None:
+    for anime in db.scalars(select(Anime)).all():
+        present = [item for item in anime.files if item.status == "present"]
+        if not present:
+            anime.has_show_nfo = False
+            continue
+        is_movie = len(present) == 1 and (anime.media_type or "").casefold() == "movie"
+        if is_movie:
+            anime.has_show_nfo = True
+            continue
+        parents = [str(Path(item.path).parent) for item in present]
+        common_dir = Path(os.path.commonpath(parents))
+        anime.has_show_nfo = (
+            "tvshow.nfo" in _directory_entries(common_dir / "_placeholder", directory_cache)
+        )
 
 
 def directory_group_key(path: Path) -> str:
@@ -186,14 +228,23 @@ def scan_library(db: Session, root_id: int, task_id: int) -> None:
         db.query(MediaFile).filter(MediaFile.library_root_id == root.id).update({"status": "missing"})
         db.commit()
 
-        paths = sorted(
+        discovered_files = sorted(
             path
             for path in root_path.rglob("*")
             if path.is_file()
-            and path.suffix.lower() in VIDEO_EXTENSIONS
             and DELETION_DIRECTORY_NAME not in path.relative_to(root_path).parts
         )
+        paths = [
+            path for path in discovered_files
+            if path.suffix.lower() in VIDEO_EXTENSIONS
+        ]
         warnings: list[str] = []
+        directory_cache: dict[Path, set[str]] = {}
+        for discovered in discovered_files:
+            directory_cache.setdefault(
+                discovered.parent,
+                set(),
+            ).add(discovered.name.casefold())
         created = updated = 0
         for index, path in enumerate(paths, start=1):
             stat = path.stat()
@@ -223,6 +274,9 @@ def scan_library(db: Session, root_id: int, task_id: int) -> None:
                     )
                 )
             parsed = parse_filename(path)
+            directory_entries = _directory_entries(path, directory_cache)
+            has_nfo = path.with_suffix(".nfo").name.casefold() in directory_entries
+            has_episode_image = _has_episode_image(path, directory_entries)
             media_info, warning = ({}, None) if media_unchanged else probe_media(path)
             if warning and len(warnings) < 20:
                 warnings.append(warning)
@@ -240,6 +294,8 @@ def scan_library(db: Session, root_id: int, task_id: int) -> None:
                 existing.content_hash = digest
                 existing.parsed_title = parsed.title
                 existing.episode = parsed.episode
+                existing.has_nfo = has_nfo
+                existing.has_episode_image = has_episode_image
                 existing.status = "present"
                 if group:
                     existing.match_group_id = group.id
@@ -259,6 +315,8 @@ def scan_library(db: Session, root_id: int, task_id: int) -> None:
                         hash_algorithm="blake2b-256",
                         parsed_title=parsed.title,
                         episode=parsed.episode,
+                        has_nfo=has_nfo,
+                        has_episode_image=has_episode_image,
                         match_group_id=group.id if group else None,
                         **media_info,
                     )
@@ -267,6 +325,7 @@ def scan_library(db: Session, root_id: int, task_id: int) -> None:
             task.message = f"正在扫描 {index}/{len(paths)}"
             db.commit()
         merged_groups = delete_empty_pending_groups(db, root.id)
+        update_catalog_sidecar_health(db, directory_cache)
         root.last_scan_at = datetime.now(timezone.utc)
         task.status = "completed"
         task.progress = 1

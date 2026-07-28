@@ -5,7 +5,9 @@ import { api, type Anime } from '../api'
 import { getEpisodeHealth, hasExportBlockers, missingEpisodeText } from '../utils'
 
 const items = ref<Anime[]>([])
-const issueFilters = ref<Array<'missing' | 'unfilled'>>([])
+type IssueFilter = 'missing' | 'unfilled' | 'directory' | 'nfo' | 'episodeImage'
+
+const issueFilters = ref<IssueFilter[]>([])
 const selected = ref<Anime | null>(null)
 const detailOpen = ref(false)
 const previewOpen = ref(false)
@@ -27,9 +29,13 @@ const filteredItems = computed(() => {
   if (!issueFilters.value.length) return items.value
   return items.value.filter((item) => {
     const health = itemHealth.value[item.id]
-    return issueFilters.value.some(filter =>
-      filter === 'missing' ? health.missingEpisodes.length > 0 : health.unfilledCount > 0,
-    )
+    return issueFilters.value.some((filter) => {
+      if (filter === 'missing') return health.missingEpisodes.length > 0
+      if (filter === 'unfilled') return health.unfilledCount > 0
+      if (filter === 'directory') return item.catalog_health.directory_name_mismatch
+      if (filter === 'nfo') return item.catalog_health.missing_nfo_count > 0
+      return item.catalog_health.missing_episode_image_count > 0
+    })
   })
 })
 const missingAnimeCount = computed(() =>
@@ -37,6 +43,15 @@ const missingAnimeCount = computed(() =>
 )
 const unfilledAnimeCount = computed(() =>
   items.value.filter(item => itemHealth.value[item.id].unfilledCount > 0).length,
+)
+const directoryMismatchCount = computed(() =>
+  items.value.filter(item => item.catalog_health.directory_name_mismatch).length,
+)
+const missingNfoCount = computed(() =>
+  items.value.filter(item => item.catalog_health.missing_nfo_count > 0).length,
+)
+const missingEpisodeImageCount = computed(() =>
+  items.value.filter(item => item.catalog_health.missing_episode_image_count > 0).length,
 )
 const bulkChangedFiles = computed(() =>
   (bulkRenamePreview.value?.files || []).filter((item: any) => item.changed),
@@ -178,6 +193,9 @@ onMounted(load)
       <el-checkbox-group v-model="issueFilters">
         <el-checkbox-button value="missing">缺集 {{ missingAnimeCount }}</el-checkbox-button>
         <el-checkbox-button value="unfilled">集数未填写 {{ unfilledAnimeCount }}</el-checkbox-button>
+        <el-checkbox-button value="directory">目录名不一致 {{ directoryMismatchCount }}</el-checkbox-button>
+        <el-checkbox-button value="nfo">缺少 NFO {{ missingNfoCount }}</el-checkbox-button>
+        <el-checkbox-button value="episodeImage">缺少剧集图片 {{ missingEpisodeImageCount }}</el-checkbox-button>
       </el-checkbox-group>
       <el-button v-if="issueFilters.length" text @click="issueFilters = []">显示全部</el-button>
     </div>
@@ -206,6 +224,15 @@ onMounted(load)
             </el-tag>
             <el-tag v-if="itemHealth[item.id].unfilledCount" type="warning">
               {{ itemHealth[item.id].unfilledCount }} 个文件未填集数
+            </el-tag>
+            <el-tag v-if="item.catalog_health.directory_name_mismatch" type="warning">
+              目录名不一致
+            </el-tag>
+            <el-tag v-if="item.catalog_health.missing_nfo_count" type="danger">
+              缺 {{ item.catalog_health.missing_nfo_count }} 个 NFO
+            </el-tag>
+            <el-tag v-if="item.catalog_health.missing_episode_image_count" type="warning">
+              缺 {{ item.catalog_health.missing_episode_image_count }} 张剧集图片
             </el-tag>
             <el-tag v-for="mapping in item.mappings" :key="mapping.source" :type="mapping.is_mock ? 'warning' : 'success'">{{ mapping.source }}</el-tag>
           </div>

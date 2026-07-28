@@ -66,6 +66,12 @@ class MediaFilePatch(BaseModel):
     parsed_title: str | None = Field(default=None, min_length=1, max_length=500)
 
 
+class CatalogHealthOut(BaseModel):
+    directory_name_mismatch: bool
+    missing_nfo_count: int
+    missing_episode_image_count: int
+
+
 class CandidateOut(ORMModel):
     id: int
     source: str
@@ -137,6 +143,7 @@ class AnimeOut(ORMModel):
     cast: list[dict[str, Any]]
     staff: list[dict[str, Any]]
     field_provenance: dict[str, str]
+    catalog_health: CatalogHealthOut
     mappings: list[MappingOut] = []
     files: list[MediaFileOut] = []
     updated_at: datetime

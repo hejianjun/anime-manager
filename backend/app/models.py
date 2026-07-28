@@ -44,6 +44,7 @@ class Anime(Base):
     episode_count: Mapped[int | None] = mapped_column(Integer)
     studio: Mapped[str | None] = mapped_column(String(500))
     cover_url: Mapped[str | None] = mapped_column(String(2048))
+    has_show_nfo: Mapped[bool] = mapped_column(Boolean, default=False)
     episode_titles: Mapped[dict[str, str]] = mapped_column(JSON, default=dict)
     genres: Mapped[list[str]] = mapped_column(JSON, default=list)
     tags: Mapped[list[str]] = mapped_column(JSON, default=list)
@@ -57,6 +58,12 @@ class Anime(Base):
     mappings: Mapped[list[SourceMapping]] = relationship(
         back_populates="anime", cascade="all, delete-orphan"
     )
+
+    @property
+    def catalog_health(self) -> dict[str, bool | int]:
+        from .catalog_health import catalog_health
+
+        return catalog_health(self)
 
 
 class MatchGroup(Base):
@@ -94,6 +101,8 @@ class MediaFile(Base):
     width: Mapped[int | None] = mapped_column(Integer)
     height: Mapped[int | None] = mapped_column(Integer)
     video_codec: Mapped[str | None] = mapped_column(String(80))
+    has_nfo: Mapped[bool] = mapped_column(Boolean, default=False)
+    has_episode_image: Mapped[bool] = mapped_column(Boolean, default=False)
     status: Mapped[str] = mapped_column(String(40), default="present")
     match_group_id: Mapped[int | None] = mapped_column(ForeignKey("match_group.id"))
     anime_id: Mapped[int | None] = mapped_column(ForeignKey("anime.id"))

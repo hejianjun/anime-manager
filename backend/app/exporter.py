@@ -188,6 +188,12 @@ async def export_anime(db: Session, anime: Anime, overwrite: bool) -> dict:
         for path, content, _ in plan["_outputs"]:
             _atomic_write(path, content, overwrite)
             written.append(str(path))
+        present = [item for item in anime.files if item.status == "present"]
+        is_movie = len(present) == 1 and (anime.media_type or "").casefold() == "movie"
+        for media in present:
+            media.has_nfo = True
+        if not is_movie:
+            anime.has_show_nfo = True
         if anime.cover_url:
             target = plan["_poster_dir"] / "poster.jpg"
             if target.exists() and not overwrite:

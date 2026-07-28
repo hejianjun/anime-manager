@@ -4,7 +4,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
 from app.database import Base
-from app.models import LibraryRoot, MatchGroup, MediaFile, TaskRecord
+from app.models import Anime, LibraryRoot, MatchGroup, MediaFile, TaskRecord
 from app.scanner import (
     content_hash,
     folder_search_keyword,
@@ -170,3 +170,46 @@ def test_scan_ignores_deletion_directory(tmp_path: Path, monkeypatch) -> None:
 
         files = db.query(MediaFile).all()
         assert [item.path for item in files] == [str(active_video.resolve())]
+
+
+def test_scan_records_nfo_and_episode_image_health(tmp_path: Path, monkeypatch) -> None:
+    series = tmp_path / "Example"
+    series.mkdir()
+    video = series / "Example - S01E01.mkv"
+    video.write_bytes(b"episode")
+    video.with_suffix(".nfo").write_text("<episodedetails />", encoding="utf-8")
+    (series / "Example - S01E01-thumb.jpg").write_bytes(b"image")
+    (series / "tvshow.nfo").write_text("<tvshow />", encoding="utf-8")
+
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    monkeypatch.setattr("app.scanner.probe_media", lambda _path: ({}, None))
+
+    with Session(engine) as db:
+        root = LibraryRoot(path=str(tmp_path))
+        anime = Anime(title="Example", media_type="OVA")
+        task = TaskRecord(kind="scan_library")
+        db.add_all([root, anime, task])
+        db.flush()
+        stat = video.stat()
+        db.add(
+            MediaFile(
+                library_root_id=root.id,
+                anime_id=anime.id,
+                path=str(video.resolve()),
+                relative_path=str(video.relative_to(tmp_path)),
+                size=stat.st_size,
+                modified_ns=stat.st_mtime_ns,
+                content_hash=content_hash(video),
+                parsed_title="Example",
+                episode=1,
+            )
+        )
+        db.commit()
+
+        scan_library(db, root.id, task.id)
+
+        scanned = db.query(MediaFile).one()
+        assert scanned.has_nfo is True
+        assert scanned.has_episode_image is True
+        assert db.get(Anime, anime.id).has_show_nfo is True

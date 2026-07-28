@@ -61,6 +61,11 @@ export interface Anime {
   genres: string[]
   tags: string[]
   field_provenance: Record<string, string>
+  catalog_health: {
+    directory_name_mismatch: boolean
+    missing_nfo_count: number
+    missing_episode_image_count: number
+  }
   mappings: Array<{ source: string; source_id: string; is_mock: boolean }>
   files: MediaFile[]
   updated_at: string
