@@ -103,6 +103,14 @@ class SelectionRequest(BaseModel):
     selections: dict[str, int | None]
 
 
+class BindExistingRequest(BaseModel):
+    anime_id: int
+
+
+class RenameRequest(BaseModel):
+    season: int = Field(default=1, ge=0, le=99)
+
+
 class MappingOut(ORMModel):
     source: str
     source_id: str

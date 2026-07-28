@@ -19,6 +19,7 @@ from .database import Base, SessionLocal, engine, get_db
 from .errors import AppError
 from .exporter import build_export_plan, export_anime, public_export_plan
 from .matching import confirm_group, refresh_anime, save_selections, search_group
+from .media_ops import bind_group_to_anime, build_rename_plan, execute_rename_plan
 from .models import (
     Anime,
     AppSetting,
@@ -31,6 +32,7 @@ from .scanner import scan_library
 from .schemas import (
     AnimeOut,
     AnimePatch,
+    BindExistingRequest,
     ExportRequest,
     LibraryRootCreate,
     LibraryRootOut,
@@ -38,6 +40,7 @@ from .schemas import (
     MatchGroupOut,
     MatchGroupPatch,
     MediaFilePatch,
+    RenameRequest,
     SearchRequest,
     SelectionRequest,
     SettingsPatch,
@@ -362,6 +365,18 @@ async def confirm(group_id: int, db: Session = Depends(get_db)):
     )
 
 
+@app.post("/api/match-groups/{group_id}/bind-existing", response_model=AnimeOut)
+def bind_existing(group_id: int, payload: BindExistingRequest, db: Session = Depends(get_db)):
+    group = db.scalar(_group_query().where(MatchGroup.id == group_id))
+    if not group:
+        raise AppError("NOT_FOUND", "匹配分组不存在", status_code=404)
+    anime = db.get(Anime, payload.anime_id)
+    if not anime:
+        raise AppError("NOT_FOUND", "目标作品不存在", status_code=404)
+    bind_group_to_anime(db, group, anime)
+    return db.scalar(_anime_query().where(Anime.id == anime.id))
+
+
 def _anime_query():
     return select(Anime).options(
         selectinload(Anime.files).selectinload(MediaFile.library_root),
@@ -420,6 +435,22 @@ async def refresh(anime_id: int, db: Session = Depends(get_db)):
     if not anime:
         raise AppError("NOT_FOUND", "作品不存在", status_code=404)
     return await refresh_anime(db, anime)
+
+
+@app.post("/api/anime/{anime_id}/rename-preview")
+def rename_preview(anime_id: int, payload: RenameRequest, db: Session = Depends(get_db)):
+    anime = db.scalar(_anime_query().where(Anime.id == anime_id))
+    if not anime:
+        raise AppError("NOT_FOUND", "作品不存在", status_code=404)
+    return build_rename_plan(anime, payload.season)
+
+
+@app.post("/api/anime/{anime_id}/rename")
+def rename_files(anime_id: int, payload: RenameRequest, db: Session = Depends(get_db)):
+    anime = db.scalar(_anime_query().where(Anime.id == anime_id))
+    if not anime:
+        raise AppError("NOT_FOUND", "作品不存在", status_code=404)
+    return execute_rename_plan(db, anime, payload.season)
 
 
 @app.get("/api/anime/{anime_id}/export-preview")

@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
 import { ElMessage } from 'element-plus'
-import { api, type Candidate, type MatchGroup } from '../api'
+import { api, type Anime, type Candidate, type MatchGroup } from '../api'
 import { groupCandidates } from '../utils'
 
 const groups = ref<MatchGroup[]>([])
@@ -11,6 +11,8 @@ const confirming = ref(false)
 const keyword = ref('')
 const selections = ref<Record<string, number | null>>({ anidb: null, dmm: null, getchu: null })
 const sources = ['anidb', 'dmm', 'getchu']
+const animeItems = ref<Anime[]>([])
+const existingAnimeId = ref<number | null>(null)
 const bySource = computed(() => groupCandidates(active.value?.candidates || [], sources))
 
 async function loadGroups() {
@@ -18,11 +20,29 @@ async function loadGroups() {
   if (!active.value && groups.value.length) selectGroup(groups.value[0])
 }
 
+async function loadAnime() {
+  animeItems.value = (await api.get('/anime', { params: { page_size: 100 } })).data.items
+}
+
 function selectGroup(group: MatchGroup) {
   active.value = group
   keyword.value = group.search_keyword
   selections.value = { anidb: null, dmm: null, getchu: null }
+  existingAnimeId.value = null
   group.candidates.filter(item => item.selected).forEach(item => selections.value[item.source] = item.id)
+}
+
+async function bindExisting() {
+  if (!active.value || !existingAnimeId.value) return
+  confirming.value = true
+  try {
+    const anime = (await api.post(`/match-groups/${active.value.id}/bind-existing`, { anime_id: existingAnimeId.value })).data
+    ElMessage.success(`已添加到「${anime.title}」`)
+    active.value = null
+    await Promise.all([loadGroups(), loadAnime()])
+  } catch (error) {
+    ElMessage.error((error as Error).message)
+  } finally { confirming.value = false }
 }
 
 async function search() {
@@ -58,7 +78,7 @@ async function confirm() {
   } finally { confirming.value = false }
 }
 
-onMounted(loadGroups)
+onMounted(() => Promise.all([loadGroups(), loadAnime()]))
 </script>
 
 <template>
@@ -96,6 +116,13 @@ onMounted(loadGroups)
         <div style="margin-top: 26px">
           <el-button type="primary" :loading="confirming" @click="confirm">确认并永久绑定</el-button>
           <span class="muted" style="margin-left:12px">每个来源最多选择一个</span>
+        </div>
+        <div class="existing-bind">
+          <div><p class="eyebrow">EXISTING COLLECTION</p><b>添加到已绑定作品</b></div>
+          <el-select v-model="existingAnimeId" filterable clearable placeholder="搜索已有作品" style="min-width: 280px">
+            <el-option v-for="anime in animeItems" :key="anime.id" :label="anime.title" :value="anime.id" />
+          </el-select>
+          <el-button :disabled="!existingAnimeId" :loading="confirming" @click="bindExisting">直接加入</el-button>
         </div>
       </template>
       <div v-else class="empty">选择左侧分组开始匹配</div>

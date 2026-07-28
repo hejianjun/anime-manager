@@ -60,6 +60,8 @@ a { color: inherit; text-decoration: none; }
 .candidate.selected { border-color: var(--cyan); }
 .candidate input[type="radio"] { appearance: none; width: 17px; height: 17px; margin: 0; border: 1px solid #718093; border-radius: 50%; cursor: pointer; }
 .candidate input[type="radio"]:checked { border: 5px solid var(--cyan); background: #0d1117; }
+.existing-bind { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; margin-top: 22px; padding: 16px; border: 1px solid var(--line); background: #11171e; }
+.existing-bind > div:first-child { margin-right: auto; }
 .score { color: var(--cyan); font-variant-numeric: tabular-nums; }
 .anime-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(270px, 1fr)); gap: 16px; }
 .anime-card { min-height: 210px; padding: 20px; border: 1px solid var(--line); background: var(--surface); cursor: pointer; }

@@ -11,6 +11,9 @@ const previewOpen = ref(false)
 const preview = ref<any>(null)
 const overwrite = ref(false)
 const busy = ref(false)
+const renameOpen = ref(false)
+const renamePreview = ref<any>(null)
+const renameSeason = ref(1)
 
 async function load() {
   items.value = (await api.get('/anime', { params: { page_size: 100 } })).data.items
@@ -61,6 +64,30 @@ async function saveEpisode(file: any) {
   } catch (error) { ElMessage.error((error as Error).message) }
 }
 
+async function previewRename() {
+  if (!selected.value) return
+  busy.value = true
+  try {
+    renamePreview.value = (await api.post(`/anime/${selected.value.id}/rename-preview`, { season: renameSeason.value })).data
+    renameOpen.value = true
+  } catch (error) { ElMessage.error((error as Error).message) }
+  finally { busy.value = false }
+}
+
+async function renameFiles() {
+  if (!selected.value || renamePreview.value?.blockers?.length) return
+  await ElMessageBox.confirm('视频将移动到作品目录并重命名，不会覆盖现有文件。确认继续？', '批量重命名确认', { type: 'warning' })
+  busy.value = true
+  try {
+    const result = (await api.post(`/anime/${selected.value.id}/rename`, { season: renameSeason.value })).data
+    ElMessage.success(`已移动并重命名 ${result.moved.length} 个视频`)
+    renameOpen.value = false
+    selected.value = (await api.get(`/anime/${selected.value.id}`)).data
+    await load()
+  } catch (error) { ElMessage.error((error as Error).message) }
+  finally { busy.value = false }
+}
+
 onMounted(load)
 </script>
 
@@ -104,7 +131,28 @@ onMounted(load)
     </template>
     <template #footer>
       <el-button :loading="busy" @click="refresh">刷新元数据</el-button>
+      <el-button :loading="busy" @click="previewRename">批量重命名</el-button>
       <el-button type="primary" @click="showPreview">预览导出</el-button>
+    </template>
+  </el-dialog>
+
+  <el-dialog v-model="renameOpen" width="min(980px, 96vw)" title="批量移动与重命名预览">
+    <div class="toolbar">
+      <span>季度</span>
+      <el-input-number v-model="renameSeason" :min="0" :max="99" @change="previewRename" />
+      <span class="muted">目标目录：{{ renamePreview?.target_dir }}</span>
+    </div>
+    <el-alert v-if="renamePreview?.blockers?.length" type="error" :closable="false" title="存在阻塞项">
+      <div v-for="item in renamePreview.blockers" :key="item">{{ item }}</div>
+    </el-alert>
+    <el-table :data="renamePreview?.files || []" size="small">
+      <el-table-column prop="episode" label="集" width="70" />
+      <el-table-column prop="source" label="当前路径" min-width="300" show-overflow-tooltip />
+      <el-table-column prop="target" label="目标路径" min-width="340" show-overflow-tooltip />
+    </el-table>
+    <template #footer>
+      <el-button @click="renameOpen = false">取消</el-button>
+      <el-button type="primary" :disabled="Boolean(renamePreview?.blockers?.length)" :loading="busy" @click="renameFiles">确认移动并重命名</el-button>
     </template>
   </el-dialog>
 
