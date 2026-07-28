@@ -24,10 +24,12 @@ def media(root: LibraryRoot, path: Path, episode: int | None) -> MediaFile:
 def test_tvshow_plan_contains_show_and_episode_nfo(tmp_path: Path) -> None:
     root = LibraryRoot(id=1, path=str(tmp_path))
     anime = Anime(id=1, title="Example", media_type="OVA")
+    anime.episode_titles = {"1": "Episode title"}
     anime.files = [media(root, tmp_path / "Example 01.mkv", 1)]
     plan = build_export_plan(anime)
     assert plan["mode"] == "tvshow"
     assert [item["kind"] for item in plan["files"]] == ["tvshow", "episode"]
+    assert "<title>Episode title</title>" in plan["files"][1]["content"]
     assert not plan["blockers"]
 
 
@@ -46,4 +48,3 @@ def test_export_rejects_path_outside_root(tmp_path: Path) -> None:
     with pytest.raises(AppError) as caught:
         build_export_plan(anime)
     assert caught.value.code == "PATH_OUTSIDE_LIBRARY"
-

@@ -58,6 +58,7 @@ def test_rename_plan_and_execute_move_files(tmp_path: Path) -> None:
     with Session(engine) as db:
         root = LibraryRoot(path=str(tmp_path))
         anime = Anime(title="作品名")
+        anime.episode_titles = {"3": "公式集标题"}
         db.add_all([root, anime])
         db.flush()
         source = tmp_path / "incoming" / "Example - S01E03 - 集标题.MP4"
@@ -70,7 +71,7 @@ def test_rename_plan_and_execute_move_files(tmp_path: Path) -> None:
 
         plan = build_rename_plan(anime, 1)
         assert plan["blockers"] == []
-        assert plan["files"][0]["target"].endswith("作品名 - S01E03 - 集标题.mp4")
+        assert plan["files"][0]["target"].endswith("作品名 - S01E03 - 公式集标题.mp4")
 
         result = execute_rename_plan(db, anime, 1)
 

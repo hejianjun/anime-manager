@@ -69,6 +69,35 @@ def _preferred_detail_titles(titles: list[etree._Element]) -> tuple[str | None, 
     return japanese or main or english, japanese or main
 
 
+def _episode_titles(root: etree._Element) -> dict[str, str]:
+    result: dict[str, str] = {}
+    for episode in root.findall("./episodes/episode"):
+        epno = episode.find("epno")
+        if epno is None or epno.attrib.get("type", "1") != "1":
+            continue
+        number = (epno.text or "").strip()
+        if not number.isdigit():
+            continue
+        titles = episode.findall("title")
+        preferred = next(
+            (
+                (item.text or "").strip()
+                for language in ("ja", "x-jat", "en")
+                for item in titles
+                if item.attrib.get(XML_LANG) == language and (item.text or "").strip()
+            ),
+            None,
+        )
+        if not preferred:
+            preferred = next(
+                ((item.text or "").strip() for item in titles if (item.text or "").strip()),
+                None,
+            )
+        if preferred:
+            result[str(int(number))] = preferred
+    return result
+
+
 class AniDBScraper(Scraper):
     source = "anidb"
     _request_lock = asyncio.Lock()
@@ -184,7 +213,13 @@ class AniDBScraper(Scraper):
                 fetched_at = fetched_at.replace(tzinfo=timezone.utc)
         else:
             fetched_at = None
-        if cached and fetched_at and datetime.now(timezone.utc) - fetched_at < timedelta(days=1):
+        cache_has_episode_titles = cached and "episode_titles" in cached.normalized_payload
+        if (
+            cached
+            and cache_has_episode_titles
+            and fetched_at
+            and datetime.now(timezone.utc) - fetched_at < timedelta(days=1)
+        ):
             metadata = SourceMetadata(**cached.normalized_payload)
             title, original_title = _preferred_stored_titles(db, int(source_id))
             if title:
@@ -250,6 +285,7 @@ class AniDBScraper(Scraper):
             media_type=root.findtext("type"),
             episode_count=int(root.findtext("episodecount")) if (root.findtext("episodecount") or "").isdigit() else None,
             cover_url=f"https://cdn.anidb.net/images/main/{picture}" if picture else None,
+            episode_titles=_episode_titles(root),
             tags=[
                 item.findtext("name")
                 for item in root.findall("./tags/tag")
@@ -265,6 +301,7 @@ class AniDBScraper(Scraper):
             "type": root.findtext("type"),
             "startdate": start_date,
             "picture": picture,
+            "episode_titles": metadata.episode_titles,
         }
         if cached:
             cached.raw_payload = raw

@@ -232,9 +232,12 @@ onMounted(load)
       </el-descriptions>
       <h4>媒体文件</h4>
       <el-table :data="selected.files" size="small">
-        <el-table-column prop="relative_path" label="文件" min-width="330" />
+        <el-table-column prop="relative_path" label="文件" min-width="280" show-overflow-tooltip />
         <el-table-column label="集号" width="130">
           <template #default="{ row }"><el-input-number v-model="row.episode" :min="0" :max="9999" size="small" controls-position="right" @change="saveEpisode(row)" /></template>
+        </el-table-column>
+        <el-table-column label="集标题" min-width="190" show-overflow-tooltip>
+          <template #default="{ row }">{{ selected.episode_titles[String(row.episode)] || '-' }}</template>
         </el-table-column>
         <el-table-column prop="status" label="状态" width="90" />
       </el-table>
@@ -257,6 +260,7 @@ onMounted(load)
     </el-alert>
     <el-table :data="renamePreview?.files || []" size="small">
       <el-table-column prop="episode" label="集" width="70" />
+      <el-table-column prop="episode_title" label="集标题" min-width="190" show-overflow-tooltip />
       <el-table-column prop="source" label="当前路径" min-width="300" show-overflow-tooltip />
       <el-table-column prop="target" label="目标路径" min-width="340" show-overflow-tooltip />
     </el-table>
@@ -288,6 +292,7 @@ onMounted(load)
     <el-table :data="bulkChangedFiles" size="small" max-height="560">
       <el-table-column prop="anime_title" label="作品" min-width="190" show-overflow-tooltip />
       <el-table-column prop="episode" label="集" width="70" />
+      <el-table-column prop="episode_title" label="集标题" min-width="190" show-overflow-tooltip />
       <el-table-column prop="source" label="当前路径" min-width="300" show-overflow-tooltip />
       <el-table-column prop="target" label="目标路径" min-width="340" show-overflow-tooltip />
     </el-table>

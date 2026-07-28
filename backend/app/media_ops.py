@@ -51,7 +51,8 @@ def build_rename_plan(anime: Anime, season: int = 1) -> dict:
         if media.episode is None:
             blockers.append(f"{media.relative_path} 缺少集号")
             continue
-        suffix = f" - {_safe_name(parsed.episode_title)}" if parsed.episode_title else ""
+        episode_title = (anime.episode_titles or {}).get(str(media.episode)) or parsed.episode_title
+        suffix = f" - {_safe_name(episode_title)}" if episode_title else ""
         filename = f"{_safe_name(anime.title)} - S{season:02d}E{media.episode:02d}{suffix}{source.suffix.lower()}"
         target = target_dir / filename
         if target in targets:
@@ -65,7 +66,7 @@ def build_rename_plan(anime: Anime, season: int = 1) -> dict:
                 "source": str(source),
                 "target": str(target),
                 "episode": media.episode,
-                "episode_title": parsed.episode_title,
+                "episode_title": episode_title,
                 "changed": source != target,
             }
         )

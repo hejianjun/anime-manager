@@ -46,7 +46,8 @@ def _show_nfo(anime: Anime) -> bytes:
 
 def _episode_nfo(anime: Anime, episode: int) -> bytes:
     root = ET.Element("episodedetails")
-    _text(root, "title", f"{anime.title} - {episode:02d}")
+    title = (anime.episode_titles or {}).get(str(episode)) or f"{anime.title} - {episode:02d}"
+    _text(root, "title", title)
     _text(root, "showtitle", anime.title)
     _text(root, "season", 1)
     _text(root, "episode", episode)

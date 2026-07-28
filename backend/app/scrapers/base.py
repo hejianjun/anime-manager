@@ -39,6 +39,7 @@ class SourceMetadata:
     episode_count: int | None = None
     studio: str | None = None
     cover_url: str | None = None
+    episode_titles: dict[str, str] | None = None
     genres: list[str] | None = None
     tags: list[str] | None = None
     cast: list[dict[str, Any]] | None = None

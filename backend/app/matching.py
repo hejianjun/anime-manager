@@ -89,6 +89,7 @@ def _apply_metadata(anime: Anime, metadata: SourceMetadata) -> None:
         "episode_count": "episode_count",
         "studio": "studio",
         "cover_url": "cover_url",
+        "episode_titles": "episode_titles",
         "genres": "genres",
         "tags": "tags",
         "cast": "cast",
@@ -99,7 +100,7 @@ def _apply_metadata(anime: Anime, metadata: SourceMetadata) -> None:
         if target_field in (anime.manual_fields or []):
             continue
         value = values.get(source_field)
-        if value not in (None, "", []):
+        if value not in (None, "", [], {}):
             setattr(anime, target_field, value)
             provenance[target_field] = metadata.source
     anime.field_provenance = provenance

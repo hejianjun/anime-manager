@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -96,7 +96,13 @@ class MatchGroupPatch(BaseModel):
 
 class SearchRequest(BaseModel):
     keyword: str | None = Field(default=None, min_length=1, max_length=500)
-    sources: list[str] = ["anidb", "dmm", "getchu"]
+    sources: list[str] | None = None
+
+
+class BulkSearchRequest(BaseModel):
+    pattern: str = Field(min_length=1, max_length=500)
+    group_types: list[Literal["collection", "single"]] = ["collection", "single"]
+    sources: list[str] | None = None
 
 
 class SelectionRequest(BaseModel):
@@ -127,6 +133,7 @@ class AnimeOut(ORMModel):
     episode_count: int | None
     studio: str | None
     cover_url: str | None
+    episode_titles: dict[str, str]
     genres: list[str]
     tags: list[str]
     cast: list[dict[str, Any]]
@@ -150,6 +157,7 @@ class AnimePatch(BaseModel):
 
 
 class SettingsPatch(BaseModel):
+    enabled_scrapers: list[Literal["anidb", "dmm", "getchu"]] | None = None
     anidb_client: str | None = None
     anidb_clientver: int | None = None
     dmm_api_id: str | None = None

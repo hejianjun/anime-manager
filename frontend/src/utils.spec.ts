@@ -66,6 +66,7 @@ const anime = (episodeCount: number | null, files: MediaFile[]): Anime => ({
   episode_count: episodeCount,
   studio: null,
   cover_url: null,
+  episode_titles: {},
   genres: [],
   tags: [],
   field_provenance: {},

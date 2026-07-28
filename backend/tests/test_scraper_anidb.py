@@ -6,7 +6,7 @@ from app.database import Base
 from app.models import AniDBTitle
 from app.parser import normalize_title
 from app.scrapers import AniDBScraper
-from app.scrapers.anidb import _preferred_detail_titles, _preferred_stored_titles
+from app.scrapers.anidb import _episode_titles, _preferred_detail_titles, _preferred_stored_titles
 
 
 def title(aid: int, text: str, language: str, title_type: str) -> AniDBTitle:
@@ -80,3 +80,27 @@ def test_detail_title_falls_back_to_main_without_japanese() -> None:
     ).findall("title")
 
     assert _preferred_detail_titles(titles) == ("Nihongo Name", "Nihongo Name")
+
+
+def test_episode_titles_prefer_japanese_and_ignore_specials() -> None:
+    root = etree.fromstring(
+        b"""<anime>
+        <episodes>
+          <episode>
+            <epno type="1">1</epno>
+            <title xml:lang="en">English episode</title>
+            <title xml:lang="ja">Japanese episode</title>
+          </episode>
+          <episode>
+            <epno type="1">2</epno>
+            <title xml:lang="x-jat">Romaji episode</title>
+          </episode>
+          <episode>
+            <epno type="2">S1</epno>
+            <title xml:lang="ja">Special</title>
+          </episode>
+        </episodes>
+        </anime>"""
+    )
+
+    assert _episode_titles(root) == {"1": "Japanese episode", "2": "Romaji episode"}

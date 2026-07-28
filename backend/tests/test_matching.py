@@ -9,7 +9,12 @@ from app.scrapers import SCRAPERS, SourceMetadata
 
 class StubScraper:
     async def detail(self, _db: Session, source_id: str) -> SourceMetadata:
-        return SourceMetadata(source="anidb", source_id=source_id, title="日本語名")
+        return SourceMetadata(
+            source="anidb",
+            source_id=source_id,
+            title="日本語名",
+            episode_titles={"1": "第一話", "2": "第二話"},
+        )
 
 
 async def test_confirm_reuses_anime_with_existing_source_mapping(monkeypatch) -> None:
@@ -58,4 +63,5 @@ async def test_confirm_reuses_anime_with_existing_source_mapping(monkeypatch) ->
         assert media.anime_id == anime.id
         assert group.anime_id == anime.id
         assert group.status == "confirmed"
+        assert result.episode_titles == {"1": "第一話", "2": "第二話"}
         assert db.query(Anime).count() == 1

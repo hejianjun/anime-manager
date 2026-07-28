@@ -57,6 +57,7 @@ export interface Anime {
   episode_count: number | null
   studio: string | null
   cover_url: string | null
+  episode_titles: Record<string, string>
   genres: string[]
   tags: string[]
   field_provenance: Record<string, string>
@@ -64,4 +65,3 @@ export interface Anime {
   files: MediaFile[]
   updated_at: string
 }
-

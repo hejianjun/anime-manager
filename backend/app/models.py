@@ -44,6 +44,7 @@ class Anime(Base):
     episode_count: Mapped[int | None] = mapped_column(Integer)
     studio: Mapped[str | None] = mapped_column(String(500))
     cover_url: Mapped[str | None] = mapped_column(String(2048))
+    episode_titles: Mapped[dict[str, str]] = mapped_column(JSON, default=dict)
     genres: Mapped[list[str]] = mapped_column(JSON, default=list)
     tags: Mapped[list[str]] = mapped_column(JSON, default=list)
     cast: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
@@ -193,4 +194,3 @@ class AniDBTitle(Base):
     normalized_title: Mapped[str] = mapped_column(String(500), index=True)
     language: Mapped[str] = mapped_column(String(30))
     title_type: Mapped[str] = mapped_column(String(30))
-
