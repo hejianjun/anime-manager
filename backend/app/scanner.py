@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import shutil
 import subprocess
 from datetime import datetime, timezone
@@ -15,6 +16,11 @@ from .models import LibraryRoot, MatchGroup, MediaFile, TaskRecord
 from .parser import parse_filename
 
 VIDEO_EXTENSIONS = {".mkv", ".mp4", ".avi", ".mov", ".wmv", ".m4v", ".ts", ".webm"}
+DELETION_DIRECTORY_NAME = "删除目录"
+FOLDER_YEAR = re.compile(
+    r"(?<!\d)(?:19|20)\d{2}(?!\d)"
+)
+EMPTY_BRACKETS = re.compile(r"[\(\[\{（【]\s*[\)\]\}）】]")
 
 
 def directory_group_key(path: Path) -> str:
@@ -26,6 +32,47 @@ def directory_display_title(path: Path, root_path: Path, parsed_title: str) -> s
     if path.parent.resolve() == root_path:
         return parsed_title
     return path.parent.name or parsed_title
+
+
+def folder_search_keyword(title: str) -> str:
+    """Remove release years from a folder-derived title used for source searches."""
+    keyword = FOLDER_YEAR.sub(" ", title)
+    keyword = EMPTY_BRACKETS.sub(" ", keyword)
+    keyword = re.sub(r"[\s._\-—–·・]+", " ", keyword).strip()
+    return keyword or title
+
+
+def directory_search_keyword(
+    path: Path, root_path: Path, display_title: str
+) -> str:
+    if path.parent.resolve() == root_path:
+        return display_title
+    return folder_search_keyword(display_title)
+
+
+def migrate_pending_folder_search_keywords(db: Session) -> int:
+    """Update legacy default keywords without overwriting manual search edits."""
+    root_paths = {
+        root.id: str(Path(root.path).resolve()).casefold()
+        for root in db.scalars(select(LibraryRoot)).all()
+    }
+    updated = 0
+    groups = db.scalars(
+        select(MatchGroup).where(
+            MatchGroup.status == "pending",
+            MatchGroup.search_keyword == MatchGroup.display_title,
+            MatchGroup.group_key.startswith("directory::"),
+        )
+    ).all()
+    for group in groups:
+        directory_path = group.group_key.removeprefix("directory::")
+        if directory_path == root_paths.get(group.library_root_id):
+            continue
+        keyword = folder_search_keyword(group.display_title)
+        if keyword != group.search_keyword:
+            group.search_keyword = keyword
+            updated += 1
+    return updated
 
 
 def pending_group_for_path(
@@ -44,13 +91,19 @@ def pending_group_for_path(
         )
     )
     if group:
+        title = directory_display_title(path, root_path, parsed_title)
+        if group.search_keyword == group.display_title:
+            group.search_keyword = directory_search_keyword(path, root_path, title)
+        group.display_title = title
         return group
 
     previous = existing.match_group if existing else None
     if previous and previous.status == "pending" and previous.anime_id is None:
         previous.group_key = group_key
         previous.display_title = directory_display_title(path, root_path, parsed_title)
-        previous.search_keyword = previous.display_title
+        previous.search_keyword = directory_search_keyword(
+            path, root_path, previous.display_title
+        )
         db.flush()
         return previous
 
@@ -59,7 +112,7 @@ def pending_group_for_path(
         library_root_id=root.id,
         group_key=group_key,
         display_title=title,
-        search_keyword=title,
+        search_keyword=directory_search_keyword(path, root_path, title),
     )
     db.add(group)
     db.flush()
@@ -134,7 +187,11 @@ def scan_library(db: Session, root_id: int, task_id: int) -> None:
         db.commit()
 
         paths = sorted(
-            path for path in root_path.rglob("*") if path.is_file() and path.suffix.lower() in VIDEO_EXTENSIONS
+            path
+            for path in root_path.rglob("*")
+            if path.is_file()
+            and path.suffix.lower() in VIDEO_EXTENSIONS
+            and DELETION_DIRECTORY_NAME not in path.relative_to(root_path).parts
         )
         warnings: list[str] = []
         created = updated = 0

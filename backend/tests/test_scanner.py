@@ -5,7 +5,12 @@ from sqlalchemy.orm import Session
 
 from app.database import Base
 from app.models import LibraryRoot, MatchGroup, MediaFile, TaskRecord
-from app.scanner import content_hash, scan_library
+from app.scanner import (
+    content_hash,
+    folder_search_keyword,
+    migrate_pending_folder_search_keywords,
+    scan_library,
+)
 
 
 def test_content_hash_is_stable_after_rename(tmp_path: Path) -> None:
@@ -15,6 +20,41 @@ def test_content_hash_is_stable_after_rename(tmp_path: Path) -> None:
     second = tmp_path / "renamed.mkv"
     first.rename(second)
     assert content_hash(second) == digest
+
+
+def test_folder_search_keyword_removes_year_but_keeps_title() -> None:
+    assert folder_search_keyword("葬送のフリーレン (2023)") == "葬送のフリーレン"
+    assert folder_search_keyword("[2024] ダンダダン") == "ダンダダン"
+    assert folder_search_keyword("86―エイティシックス―") == "86―エイティシックス―"
+
+
+def test_migrate_pending_folder_keywords_preserves_manual_edits(
+    tmp_path: Path,
+) -> None:
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        root = LibraryRoot(path=str(tmp_path))
+        db.add(root)
+        db.flush()
+        default_group = MatchGroup(
+            library_root_id=root.id,
+            group_key=f"directory::{str(tmp_path / 'Title (2024)').casefold()}",
+            display_title="Title (2024)",
+            search_keyword="Title (2024)",
+        )
+        manual_group = MatchGroup(
+            library_root_id=root.id,
+            group_key=f"directory::{str(tmp_path / 'Other (2023)').casefold()}",
+            display_title="Other (2023)",
+            search_keyword="手工搜索词 2023",
+        )
+        db.add_all([default_group, manual_group])
+        db.flush()
+
+        assert migrate_pending_folder_search_keywords(db) == 1
+        assert default_group.search_keyword == "Title"
+        assert manual_group.search_keyword == "手工搜索词 2023"
 
 
 def test_scan_merges_pending_files_in_same_directory(tmp_path: Path, monkeypatch) -> None:
@@ -71,9 +111,61 @@ def test_scan_merges_pending_files_in_same_directory(tmp_path: Path, monkeypatch
         groups = db.query(MatchGroup).filter_by(status="pending").all()
         assert len(groups) == 1
         assert groups[0].display_title == series.name
+        assert groups[0].search_keyword == series.name
         assert {item.path for item in groups[0].files} == {
             str(first.resolve()),
             str(second.resolve()),
         }
         assert db.get(TaskRecord, task.id).result["merged_groups"] == 1
         assert probed == []
+
+
+def test_scan_removes_folder_year_from_default_search_keyword(
+    tmp_path: Path, monkeypatch
+) -> None:
+    series = tmp_path / "葬送のフリーレン [2023]"
+    series.mkdir()
+    media_path = series / "葬送のフリーレン - 01.mp4"
+    media_path.write_bytes(b"episode")
+
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    monkeypatch.setattr("app.scanner.probe_media", lambda _path: ({}, None))
+
+    with Session(engine) as db:
+        root = LibraryRoot(path=str(tmp_path))
+        task = TaskRecord(kind="scan_library")
+        db.add_all([root, task])
+        db.commit()
+
+        scan_library(db, root.id, task.id)
+
+        group = db.query(MatchGroup).one()
+        assert group.display_title == "葬送のフリーレン [2023]"
+        assert group.search_keyword == "葬送のフリーレン"
+
+
+def test_scan_ignores_deletion_directory(tmp_path: Path, monkeypatch) -> None:
+    active = tmp_path / "active"
+    deleted = tmp_path / "删除目录" / "old-series"
+    active.mkdir()
+    deleted.mkdir(parents=True)
+    active_video = active / "Active E01.mp4"
+    deleted_video = deleted / "Deleted E01.mp4"
+    active_video.write_bytes(b"active")
+    deleted_video.write_bytes(b"deleted")
+
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    monkeypatch.setattr("app.scanner.probe_media", lambda _path: ({}, None))
+
+    with Session(engine) as db:
+        root = LibraryRoot(path=str(tmp_path))
+        task = TaskRecord(kind="scan_library")
+        db.add_all([root, task])
+        db.commit()
+
+        scan_library(db, root.id, task.id)
+
+        files = db.query(MediaFile).all()
+        assert [item.path for item in files] == [str(active_video.resolve())]

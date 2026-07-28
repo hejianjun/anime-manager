@@ -71,6 +71,13 @@ def test_rename_plan_and_execute_move_files(tmp_path: Path) -> None:
 
         plan = build_rename_plan(anime, 1)
         assert plan["blockers"] == []
+        assert plan["cleanup_dirs"] == [
+            {
+                "source": str(source.parent.resolve()),
+                "target": str((tmp_path / "删除目录" / "incoming").resolve()),
+                "changed": True,
+            }
+        ]
         assert plan["files"][0]["target"].endswith("作品名 - S01E03 - 公式集标题.mp4")
 
         result = execute_rename_plan(db, anime, 1)
@@ -148,6 +155,9 @@ def test_rename_moves_and_renames_video_sidecars(tmp_path: Path) -> None:
         assert all(not path.exists() for path in [source, *sidecars])
         assert all(not path.exists() for path in directory_sidecars)
         assert (tmp_path / "作品名" / "metadata" / "artwork.jpg").exists()
+        assert result["archived_dirs"] == [str(tmp_path / "删除目录" / "incoming")]
+        assert (tmp_path / "删除目录" / "incoming").is_dir()
+        assert not source.parent.exists()
         assert media.path.endswith("作品名 - S01E01.mkv")
 
 
@@ -174,6 +184,30 @@ def test_rename_sidecar_target_conflict_blocks_move(tmp_path: Path) -> None:
         plan = build_rename_plan(anime, 1)
 
         assert plan["blockers"] == [f"目标文件已存在: {target_subtitle}"]
+
+
+def test_rename_blocks_existing_old_folder_in_deletion_directory(tmp_path: Path) -> None:
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        root = LibraryRoot(path=str(tmp_path))
+        anime = Anime(title="作品名")
+        db.add_all([root, anime])
+        db.flush()
+        source = tmp_path / "incoming" / "Example E01.mkv"
+        source.parent.mkdir()
+        source.write_bytes(b"video")
+        (tmp_path / "删除目录" / "incoming").mkdir(parents=True)
+        media = add_media(db, root, source, 1)
+        media.anime_id = anime.id
+        db.commit()
+        db.refresh(anime)
+
+        plan = build_rename_plan(anime, 1)
+
+        assert plan["blockers"] == [
+            f"删除目录中已存在同名文件夹: {tmp_path / '删除目录' / 'incoming'}"
+        ]
 
 
 def test_bulk_rename_preview_and_execute_all_anime(tmp_path: Path) -> None:
@@ -209,6 +243,7 @@ def test_bulk_rename_preview_and_execute_all_anime(tmp_path: Path) -> None:
         assert result["anime_count"] == 2
         assert len(result["moved"]) == 2
         assert all(Path(path).exists() for path in result["moved"])
+        assert result["archived_dirs"] == [str(tmp_path / "删除目录" / "incoming")]
         assert not first_source.exists()
         assert not second_source.exists()
 

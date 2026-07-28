@@ -12,6 +12,7 @@ from .parser import parse_filename
 
 
 INVALID_FILENAME = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
+DELETION_DIRECTORY_NAME = "删除目录"
 SIDECAR_EXTENSIONS = {
     ".nfo": "nfo",
     ".srt": "subtitle",
@@ -89,6 +90,46 @@ def _remaining_sidecars(
                 }
             )
     return entries
+
+
+def _cleanup_directory_plan(
+    source_dirs: set[Path],
+    target_dir: Path,
+    library_root: Path,
+) -> tuple[list[dict], list[str]]:
+    deletion_dir = (library_root / DELETION_DIRECTORY_NAME).resolve()
+    candidates = {
+        source_dir.resolve()
+        for source_dir in source_dirs
+        if source_dir.resolve().is_dir()
+        and source_dir.resolve().is_relative_to(library_root)
+        and source_dir.resolve() not in {library_root, target_dir, deletion_dir}
+        and not source_dir.resolve().is_relative_to(deletion_dir)
+        and not target_dir.is_relative_to(source_dir.resolve())
+    }
+    top_level_sources = {
+        source
+        for source in candidates
+        if not any(source != other and source.is_relative_to(other) for other in candidates)
+    }
+    cleanup_dirs: list[dict] = []
+    blockers: list[str] = []
+    targets: set[Path] = set()
+    for source in sorted(top_level_sources, key=lambda path: str(path).casefold()):
+        target = deletion_dir / source.name
+        if target in targets:
+            blockers.append(f"多个旧目录将写入同一删除目录: {target}")
+        elif target.exists() and target != source:
+            blockers.append(f"删除目录中已存在同名文件夹: {target}")
+        targets.add(target)
+        cleanup_dirs.append(
+            {
+                "source": str(source),
+                "target": str(target),
+                "changed": source != target,
+            }
+        )
+    return cleanup_dirs, blockers
 
 
 def bind_group_to_anime(db: Session, group: MatchGroup, anime: Anime) -> Anime:
@@ -169,7 +210,17 @@ def build_rename_plan(anime: Anime, season: int = 1) -> dict:
             blockers.append(f"目标文件已存在: {entry_target}")
         targets.add(entry_target)
         files.append({**entry, "changed": entry_source != entry_target})
-    return {"anime_id": anime.id, "season": season, "target_dir": str(target_dir), "blockers": blockers, "files": files}
+    cleanup_dirs, cleanup_blockers = _cleanup_directory_plan(source_dirs, target_dir, library_root)
+    blockers.extend(cleanup_blockers)
+    return {
+        "anime_id": anime.id,
+        "season": season,
+        "target_dir": str(target_dir),
+        "deletion_dir": str(library_root / DELETION_DIRECTORY_NAME),
+        "blockers": blockers,
+        "files": files,
+        "cleanup_dirs": cleanup_dirs,
+    }
 
 
 def build_bulk_rename_plan(animes: list[Anime], season: int = 1) -> dict:
@@ -177,6 +228,9 @@ def build_bulk_rename_plan(animes: list[Anime], season: int = 1) -> dict:
     blockers: list[str] = []
     skipped: list[dict] = []
     targets: dict[Path, tuple[int, str]] = {}
+    cleanup_sources: set[Path] = set()
+    cleanup_targets: dict[Path, tuple[Path, int, str]] = {}
+    cleanup_dirs: list[dict] = []
     included_anime_ids: set[int] = set()
 
     for anime in animes:
@@ -206,15 +260,37 @@ def build_bulk_rename_plan(animes: list[Anime], season: int = 1) -> dict:
                     "target_dir": plan["target_dir"],
                 }
             )
+        for item in plan["cleanup_dirs"]:
+            source = Path(item["source"])
+            target = Path(item["target"])
+            if source in cleanup_sources:
+                continue
+            previous = cleanup_targets.get(target)
+            if previous and previous[0] != source:
+                blockers.append(
+                    f"作品「{previous[2]}」与「{anime.title}」的旧目录将写入同一删除目录: {target}"
+                )
+            else:
+                cleanup_sources.add(source)
+                cleanup_targets[target] = (source, anime.id, anime.title)
+                cleanup_dirs.append(
+                    {
+                        **item,
+                        "anime_id": anime.id,
+                        "anime_title": anime.title,
+                    }
+                )
 
     return {
         "season": season,
         "anime_count": len(included_anime_ids),
         "file_count": len(files),
         "changed_count": sum(1 for item in files if item["changed"]),
+        "cleanup_count": sum(1 for item in cleanup_dirs if item["changed"]),
         "blockers": blockers,
         "skipped": skipped,
         "files": files,
+        "cleanup_dirs": cleanup_dirs,
     }
 
 
@@ -245,18 +321,37 @@ def _rollback_moves(moved: list[tuple[Path, Path]]) -> None:
             shutil.move(str(target), str(source))
 
 
+def _execute_plan_directories(plan: dict) -> list[tuple[Path, Path]]:
+    archived: list[tuple[Path, Path]] = []
+    for item in plan["cleanup_dirs"]:
+        if not item["changed"]:
+            continue
+        source = Path(item["source"])
+        target = Path(item["target"])
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(source), str(target))
+        archived.append((source, target))
+    return archived
+
+
 def execute_rename_plan(db: Session, anime: Anime, season: int = 1) -> dict:
     plan = build_rename_plan(anime, season)
     if plan["blockers"]:
         raise AppError("RENAME_BLOCKED", "批量重命名前需要处理冲突", details=plan["blockers"], status_code=409)
 
     moved: list[tuple[Path, Path]] = []
+    archived: list[tuple[Path, Path]] = []
     try:
         moved = _execute_plan_files(db, plan)
+        archived = _execute_plan_directories(plan)
         db.commit()
-        return {"moved": [str(target) for _, target in moved]}
+        return {
+            "moved": [str(target) for _, target in moved],
+            "archived_dirs": [str(target) for _, target in archived],
+        }
     except Exception:
         db.rollback()
+        _rollback_moves(archived)
         _rollback_moves(moved)
         raise
 
@@ -272,15 +367,19 @@ def execute_bulk_rename_plan(db: Session, animes: list[Anime], season: int = 1) 
         )
 
     moved: list[tuple[Path, Path]] = []
+    archived: list[tuple[Path, Path]] = []
     try:
         moved = _execute_plan_files(db, plan)
+        archived = _execute_plan_directories(plan)
         db.commit()
         return {
             "anime_count": plan["anime_count"],
             "skipped": plan["skipped"],
             "moved": [str(target) for _, target in moved],
+            "archived_dirs": [str(target) for _, target in archived],
         }
     except Exception:
         db.rollback()
+        _rollback_moves(archived)
         _rollback_moves(moved)
         raise

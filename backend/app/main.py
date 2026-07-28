@@ -38,11 +38,12 @@ from .models import (
     SourceMapping,
     TaskRecord,
 )
-from .scanner import scan_library
+from .scanner import migrate_pending_folder_search_keywords, scan_library
 from .schemas import (
     AnimeOut,
     AnimePatch,
     BindExistingRequest,
+    BulkSearchConfirmRequest,
     ExportRequest,
     LibraryRootCreate,
     LibraryRootOut,
@@ -117,6 +118,7 @@ async def lifespan(_app: FastAPI):
         db.query(AppSetting).filter(AppSetting.key == "demo_scrapers").delete(
             synchronize_session=False
         )
+        migrate_pending_folder_search_keywords(db)
         db.commit()
     if not scheduler.running:
         scheduler.add_job(
@@ -396,6 +398,166 @@ def list_groups(
         "page": page,
         "page_size": page_size,
     }
+
+
+async def _run_bulk_search_confirm(
+    task_id: int, sources: list[str], session_factory=None
+) -> None:
+    factory = session_factory or SessionLocal
+    with factory() as db:
+        task = db.get(TaskRecord, task_id)
+        if not task:
+            return
+        try:
+            enabled = enabled_scraper_names(db)
+            groups = db.scalars(
+                _group_query()
+                .where(MatchGroup.status == "pending", MatchGroup.files.any())
+                .order_by(MatchGroup.updated_at.desc())
+            ).all()
+            total = len(groups)
+            items: list[dict[str, Any]] = []
+            confirmed = 0
+            task.status = "running"
+            task.message = f"准备处理 0/{total}"
+            task.result = {
+                "searched": 0,
+                "total": total,
+                "confirmed": 0,
+                "skipped": 0,
+                "failed": 0,
+                "items": [],
+            }
+            db.commit()
+
+            for index, group in enumerate(groups, start=1):
+                task.message = f"正在匹配 {index}/{total}：{group.display_title}"
+                task.progress = (index - 1) / max(total, 1)
+                db.commit()
+                try:
+                    candidates, search_errors = await search_group(
+                        db, group, group.search_keyword, sources
+                    )
+                    exact_by_source: dict[str, ScrapeCandidate] = {}
+                    for candidate in candidates:
+                        if candidate.score >= 1:
+                            current = exact_by_source.get(candidate.source)
+                            if current is None or candidate.score > current.score:
+                                exact_by_source[candidate.source] = candidate
+                    if not exact_by_source:
+                        items.append(
+                            {
+                                "group_id": group.id,
+                                "title": group.display_title,
+                                "status": "skipped",
+                                "reason": "没有 100% 匹配候选",
+                                "errors": search_errors,
+                            }
+                        )
+                    else:
+                        save_selections(
+                            db,
+                            group,
+                            {
+                                source: (
+                                    exact_by_source[source].id
+                                    if source in exact_by_source
+                                    else None
+                                )
+                                for source in enabled
+                            },
+                        )
+                        anime = await confirm_group(db, group, enabled)
+                        confirmed += 1
+                        items.append(
+                            {
+                                "group_id": group.id,
+                                "title": group.display_title,
+                                "status": "confirmed",
+                                "anime_id": anime.id,
+                                "anime_title": anime.title,
+                                "sources": sorted(exact_by_source),
+                                "errors": search_errors,
+                            }
+                        )
+                except AppError as exc:
+                    db.rollback()
+                    items.append(
+                        {
+                            "group_id": group.id,
+                            "title": group.display_title,
+                            "status": "failed",
+                            "reason": exc.message,
+                            "code": exc.code,
+                        }
+                    )
+
+                task = db.get(TaskRecord, task_id)
+                task.progress = index / max(total, 1)
+                task.message = f"已处理 {index}/{total}"
+                task.result = {
+                    "searched": index,
+                    "total": total,
+                    "confirmed": confirmed,
+                    "skipped": sum(item["status"] == "skipped" for item in items),
+                    "failed": sum(item["status"] == "failed" for item in items),
+                    "items": items,
+                }
+                db.commit()
+
+            task.status = "completed"
+            task.progress = 1
+            task.message = f"批量匹配完成，共处理 {total} 个"
+            db.commit()
+        except Exception as exc:
+            db.rollback()
+            task = db.get(TaskRecord, task_id)
+            if task:
+                task.status = "failed"
+                task.message = "批量匹配失败"
+                task.error = {
+                    "code": getattr(exc, "code", "BULK_MATCH_FAILED"),
+                    "message": str(exc),
+                    "retryable": True,
+                }
+                db.commit()
+
+
+@app.post(
+    "/api/match-groups/bulk-search-confirm",
+    response_model=TaskOut,
+    status_code=202,
+)
+def start_bulk_search_confirm(
+    payload: BulkSearchConfirmRequest,
+    background: BackgroundTasks,
+    db: Session = Depends(get_db),
+):
+    enabled = enabled_scraper_names(db)
+    requested = payload.sources if payload.sources is not None else enabled
+    sources = [source for source in requested if source in enabled]
+    if not sources:
+        raise AppError("NO_ENABLED_SOURCE", "没有可用于批量搜索的数据源")
+    running = db.scalar(
+        select(TaskRecord)
+        .where(
+            TaskRecord.kind == "bulk_search_confirm",
+            TaskRecord.status.in_(["pending", "running"]),
+        )
+        .order_by(TaskRecord.id.desc())
+    )
+    if running:
+        return running
+    task = TaskRecord(
+        kind="bulk_search_confirm",
+        message="等待批量匹配",
+        result={"searched": 0, "confirmed": 0, "skipped": 0, "failed": 0},
+    )
+    db.add(task)
+    db.commit()
+    db.refresh(task)
+    background.add_task(_run_bulk_search_confirm, task.id, sources)
+    return task
 
 
 @app.get("/api/match-groups/{group_id}", response_model=MatchGroupOut)

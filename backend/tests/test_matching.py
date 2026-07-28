@@ -3,9 +3,19 @@ from sqlalchemy.orm import Session
 
 from app.database import Base
 from app.errors import AppError
+from app.main import _run_bulk_search_confirm
 from app.matching import confirm_group
-from app.models import Anime, LibraryRoot, MatchGroup, MediaFile, ScrapeCandidate, SourceMapping
-from app.scrapers import SCRAPERS, SourceMetadata
+from app.models import (
+    Anime,
+    LibraryRoot,
+    MatchGroup,
+    MediaFile,
+    ScrapeCandidate,
+    SourceMapping,
+    TaskRecord,
+)
+from app.schemas import BulkSearchConfirmRequest
+from app.scrapers import SCRAPERS, Candidate, SourceMetadata
 
 
 class StubScraper:
@@ -16,6 +26,85 @@ class StubScraper:
             title="日本語名",
             episode_titles={"1": "第一話", "2": "第二話"},
         )
+
+
+class ExactSearchStub(StubScraper):
+    def __init__(self) -> None:
+        self.progress_updates: list[tuple[float, str]] = []
+
+    async def search(self, db: Session, keyword: str) -> list[Candidate]:
+        task = db.query(TaskRecord).filter_by(kind="bulk_search_confirm").one()
+        self.progress_updates.append((task.progress, task.message))
+        score = 1 if keyword == "Exact" else 0.99
+        return [
+            Candidate(
+                source="anidb",
+                source_id=keyword,
+                title=keyword,
+                score=score,
+            )
+        ]
+
+
+async def test_bulk_search_confirms_only_exact_matches(monkeypatch) -> None:
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    scraper = ExactSearchStub()
+    monkeypatch.setitem(SCRAPERS, "anidb", scraper)
+
+    with Session(engine) as db:
+        root = LibraryRoot(path="library")
+        db.add(root)
+        db.flush()
+        for index, title in enumerate(("Exact", "Near"), start=1):
+            group = MatchGroup(
+                library_root_id=root.id,
+                group_key=title,
+                display_title=title,
+                search_keyword=title,
+            )
+            db.add(group)
+            db.flush()
+            db.add(
+                MediaFile(
+                    library_root_id=root.id,
+                    path=f"{title}.mkv",
+                    relative_path=f"{title}.mkv",
+                    size=1,
+                    modified_ns=index,
+                    parsed_title=title,
+                    episode=index,
+                    match_group_id=group.id,
+                )
+            )
+        db.commit()
+
+        task = TaskRecord(kind="bulk_search_confirm")
+        db.add(task)
+        db.commit()
+        task_id = task.id
+
+    await _run_bulk_search_confirm(
+        task_id,
+        BulkSearchConfirmRequest(sources=["anidb"]).sources,
+        lambda: Session(engine),
+    )
+
+    with Session(engine) as db:
+        task = db.get(TaskRecord, task_id)
+        assert task.status == "completed"
+        assert task.progress == 1
+        assert task.result["searched"] == 2
+        assert task.result["confirmed"] == 1
+        assert task.result["skipped"] == 1
+        assert [item[0] for item in scraper.progress_updates] == [0, 0.5]
+        assert scraper.progress_updates[0][1].startswith("正在匹配 1/2：")
+        assert scraper.progress_updates[1][1].startswith("正在匹配 2/2：")
+        assert {
+            item[1].split("：", maxsplit=1)[1] for item in scraper.progress_updates
+        } == {"Exact", "Near"}
+        assert db.query(MatchGroup).filter_by(status="confirmed").one().display_title == "Exact"
+        assert db.query(MatchGroup).filter_by(status="pending").one().display_title == "Near"
 
 
 async def test_confirm_reuses_anime_with_existing_source_mapping(monkeypatch) -> None:

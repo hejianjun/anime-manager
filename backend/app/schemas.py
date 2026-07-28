@@ -99,9 +99,7 @@ class SearchRequest(BaseModel):
     sources: list[str] | None = None
 
 
-class BulkSearchRequest(BaseModel):
-    pattern: str = Field(min_length=1, max_length=500)
-    group_types: list[Literal["collection", "single"]] = ["collection", "single"]
+class BulkSearchConfirmRequest(BaseModel):
     sources: list[str] | None = None
 
 

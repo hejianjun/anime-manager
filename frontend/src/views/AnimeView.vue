@@ -120,11 +120,11 @@ async function previewRename() {
 
 async function renameFiles() {
   if (!selected.value || renamePreview.value?.blockers?.length) return
-  await ElMessageBox.confirm('视频及同名 NFO、SRT、JPG 文件将移动到作品目录并重命名，不会覆盖现有文件。确认继续？', '批量重命名确认', { type: 'warning' })
+  await ElMessageBox.confirm('媒体文件将移动到作品目录，原作品文件夹随后移入“删除目录”，不会覆盖现有文件。确认继续？', '批量重命名确认', { type: 'warning' })
   busy.value = true
   try {
     const result = (await api.post(`/anime/${selected.value.id}/rename`, { season: renameSeason.value })).data
-    ElMessage.success(`已移动并重命名 ${result.moved.length} 个文件`)
+    ElMessage.success(`已处理 ${result.moved.length} 个文件，归档 ${result.archived_dirs.length} 个旧文件夹`)
     renameOpen.value = false
     selected.value = (await api.get(`/anime/${selected.value.id}`)).data
     await load()
@@ -142,16 +142,19 @@ async function previewBulkRename() {
 }
 
 async function renameAllFiles() {
-  if (bulkRenamePreview.value?.blockers?.length || !bulkRenamePreview.value?.changed_count) return
+  if (
+    bulkRenamePreview.value?.blockers?.length
+    || (!bulkRenamePreview.value?.changed_count && !bulkRenamePreview.value?.cleanup_count)
+  ) return
   await ElMessageBox.confirm(
-    `将移动并重命名 ${bulkRenamePreview.value.changed_count} 个视频/旁挂文件，过程中不会覆盖已有文件。确认继续？`,
+    `将处理 ${bulkRenamePreview.value.changed_count} 个媒体文件，并把 ${bulkRenamePreview.value.cleanup_count} 个旧文件夹移入“删除目录”。确认继续？`,
     '全部作品批量重命名确认',
     { type: 'warning' },
   )
   busy.value = true
   try {
     const result = (await api.post('/anime/rename', { season: bulkRenameSeason.value })).data
-    ElMessage.success(`已处理 ${result.anime_count} 部作品，移动并重命名 ${result.moved.length} 个文件`)
+    ElMessage.success(`已处理 ${result.anime_count} 部作品、${result.moved.length} 个文件，归档 ${result.archived_dirs.length} 个旧文件夹`)
     bulkRenameOpen.value = false
     await load()
   } catch (error) { ElMessage.error((error as Error).message) }
@@ -273,6 +276,17 @@ onMounted(load)
       <el-table-column prop="source" label="当前路径" min-width="300" show-overflow-tooltip />
       <el-table-column prop="target" label="目标路径" min-width="340" show-overflow-tooltip />
     </el-table>
+    <el-alert
+      v-if="renamePreview?.cleanup_dirs?.length"
+      class="cleanup-preview"
+      type="warning"
+      :closable="false"
+      title="文件处理成功后，下列旧文件夹将移入删除目录"
+    >
+      <div v-for="item in renamePreview.cleanup_dirs" :key="item.source">
+        {{ item.source }} → {{ item.target }}
+      </div>
+    </el-alert>
     <template #footer>
       <el-button @click="renameOpen = false">取消</el-button>
       <el-button type="primary" :disabled="Boolean(renamePreview?.blockers?.length)" :loading="busy" @click="renameFiles">确认移动并重命名</el-button>
@@ -286,6 +300,7 @@ onMounted(load)
       <span class="muted">
         {{ bulkRenamePreview?.anime_count || 0 }} 部作品 ·
         {{ bulkRenamePreview?.changed_count || 0 }} 个文件需要处理 ·
+        {{ bulkRenamePreview?.cleanup_count || 0 }} 个旧文件夹需要归档 ·
         {{ bulkRenamePreview?.skipped?.length || 0 }} 部无可用文件
       </span>
     </div>
@@ -293,7 +308,7 @@ onMounted(load)
       <div v-for="item in bulkRenamePreview.blockers" :key="item">{{ item }}</div>
     </el-alert>
     <el-alert
-      v-else-if="!bulkRenamePreview?.changed_count"
+      v-else-if="!bulkRenamePreview?.changed_count && !bulkRenamePreview?.cleanup_count"
       type="success"
       :closable="false"
       title="所有文件已经符合命名规则，无需处理"
@@ -308,11 +323,22 @@ onMounted(load)
       <el-table-column prop="source" label="当前路径" min-width="300" show-overflow-tooltip />
       <el-table-column prop="target" label="目标路径" min-width="340" show-overflow-tooltip />
     </el-table>
+    <el-alert
+      v-if="bulkRenamePreview?.cleanup_dirs?.length"
+      class="cleanup-preview"
+      type="warning"
+      :closable="false"
+      title="文件处理成功后，旧文件夹将移入删除目录"
+    >
+      <div v-for="item in bulkRenamePreview.cleanup_dirs" :key="item.source">
+        {{ item.source }} → {{ item.target }}
+      </div>
+    </el-alert>
     <template #footer>
       <el-button @click="bulkRenameOpen = false">取消</el-button>
       <el-button
         type="primary"
-        :disabled="Boolean(bulkRenamePreview?.blockers?.length) || !bulkRenamePreview?.changed_count"
+        :disabled="Boolean(bulkRenamePreview?.blockers?.length) || (!bulkRenamePreview?.changed_count && !bulkRenamePreview?.cleanup_count)"
         :loading="busy"
         @click="renameAllFiles"
       >

@@ -70,6 +70,8 @@ a { color: inherit; text-decoration: none; }
 .existing-bind { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; margin-top: 22px; padding: 16px; border: 1px solid var(--line); background: #11171e; }
 .existing-bind > div:first-child { margin-right: auto; }
 .score { color: var(--cyan); font-variant-numeric: tabular-nums; }
+.bulk-match-progress { margin-bottom: 16px; padding: 12px; border: 1px solid var(--line); border-radius: 10px; background: rgba(255, 255, 255, .025); }
+.bulk-match-progress .muted { display: block; margin-top: 6px; font-size: 12px; }
 .catalog-filter { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin: -4px 0 20px; }
 .catalog-filter > .muted { font-size: 12px; }
 .catalog-filter .el-checkbox-button__inner { background: #11171e; border-color: var(--line); color: #9aa8b8; box-shadow: none !important; }

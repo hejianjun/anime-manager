@@ -1,12 +1,15 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import { api, type Anime, type Candidate, type MatchGroup, type MediaFile } from '../api'
 import { groupCandidates } from '../utils'
 
 const groups = ref<MatchGroup[]>([])
 const active = ref<MatchGroup | null>(null)
 const searching = ref(false)
+const bulkSearching = ref(false)
+const bulkProgress = ref(0)
+const bulkTaskText = ref('')
 const confirming = ref(false)
 const keyword = ref('')
 const selections = ref<Record<string, number | null>>({ anidb: null, dmm: null, getchu: null })
@@ -98,6 +101,53 @@ async function search() {
   } finally { searching.value = false }
 }
 
+async function bulkSearchConfirm() {
+  if (!groups.value.length) return
+  try {
+    await ElMessageBox.confirm(
+      '将搜索全部待确认分组，并自动确认其中的 100% 匹配。其他分组会保留，确认继续？',
+      '批量搜索确认',
+      {
+        type: 'warning',
+        confirmButtonText: '开始批量确认',
+        cancelButtonText: '取消',
+      },
+    )
+  } catch {
+    return
+  }
+  bulkSearching.value = true
+  bulkProgress.value = 0
+  bulkTaskText.value = '正在启动批量匹配'
+  try {
+    const task = (await api.post('/match-groups/bulk-search-confirm', {
+      sources: sources.value,
+    })).data
+    let current = task
+    for (;;) {
+      current = (await api.get(`/tasks/${task.id}`)).data
+      bulkProgress.value = Math.round(current.progress * 100)
+      bulkTaskText.value = current.message
+      if (current.status === 'completed') break
+      if (current.status === 'failed') {
+        throw new Error(current.error?.message || '批量匹配失败')
+      }
+      await new Promise(resolve => setTimeout(resolve, 800))
+    }
+    const result = current.result
+    const summary = `已搜索 ${result.searched} 个，确认 ${result.confirmed} 个，保留 ${result.skipped} 个`
+    if (result.failed) ElMessage.warning(`${summary}，失败 ${result.failed} 个`)
+    else ElMessage.success(summary)
+    active.value = null
+    await Promise.all([loadGroups(), loadAnime()])
+  } catch (error) {
+    ElMessage.error((error as Error).message)
+  } finally {
+    bulkSearching.value = false
+    if (bulkProgress.value < 100) bulkTaskText.value = ''
+  }
+}
+
 async function confirm() {
   if (!active.value) return
   confirming.value = true
@@ -118,8 +168,27 @@ onMounted(() => Promise.all([loadGroups(), loadAnime(), loadSettings()]))
 <template>
   <div class="split">
     <section class="panel">
-      <div class="panel-title"><h2>待确认分组</h2><el-tag type="warning">{{ groups.length }}</el-tag></div>
+      <div class="panel-title">
+        <div><h2>待确认分组</h2><el-tag type="warning">{{ groups.length }}</el-tag></div>
+        <el-button
+          size="small"
+          type="primary"
+          plain
+          :loading="bulkSearching"
+          :disabled="!groups.length || !sources.length"
+          @click="bulkSearchConfirm"
+        >
+          批量确认 100% 匹配
+        </el-button>
+      </div>
       <div class="group-list">
+        <div v-if="bulkSearching || bulkTaskText" class="bulk-match-progress">
+          <el-progress
+            :percentage="bulkProgress"
+            :status="bulkProgress === 100 ? 'success' : undefined"
+          />
+          <span class="muted">{{ bulkTaskText }}</span>
+        </div>
         <article v-for="group in groups" :key="group.id" class="group-card" :class="{ active: active?.id === group.id }" @click="selectGroup(group)">
           <h3>{{ group.display_title }}</h3>
           <span class="muted">{{ group.files.length }} 个文件</span>
