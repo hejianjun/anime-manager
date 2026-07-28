@@ -16,7 +16,7 @@ from .models import LibraryRoot, MatchGroup, MediaFile, TaskRecord
 from .parser import parse_filename
 
 VIDEO_EXTENSIONS = {".mkv", ".mp4", ".avi", ".mov", ".wmv", ".m4v", ".ts", ".webm"}
-DELETION_DIRECTORY_NAME = "删除目录"
+DELETION_DIRECTORY_NAME = ".delete"
 FOLDER_YEAR = re.compile(
     r"(?<!\d)(?:19|20)\d{2}(?!\d)"
 )

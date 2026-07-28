@@ -148,7 +148,7 @@ def test_scan_removes_folder_year_from_default_search_keyword(
 
 def test_scan_ignores_deletion_directory(tmp_path: Path, monkeypatch) -> None:
     active = tmp_path / "active"
-    deleted = tmp_path / "删除目录" / "old-series"
+    deleted = tmp_path / ".delete" / "old-series"
     active.mkdir()
     deleted.mkdir(parents=True)
     active_video = active / "Active E01.mp4"

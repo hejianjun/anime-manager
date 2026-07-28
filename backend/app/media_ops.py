@@ -12,7 +12,7 @@ from .parser import parse_filename
 
 
 INVALID_FILENAME = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
-DELETION_DIRECTORY_NAME = "删除目录"
+DELETION_DIRECTORY_NAME = ".delete"
 SIDECAR_EXTENSIONS = {
     ".nfo": "nfo",
     ".srt": "subtitle",
@@ -118,9 +118,9 @@ def _cleanup_directory_plan(
     for source in sorted(top_level_sources, key=lambda path: str(path).casefold()):
         target = deletion_dir / source.name
         if target in targets:
-            blockers.append(f"多个旧目录将写入同一删除目录: {target}")
+            blockers.append(f"多个旧目录将写入同一 .delete 目录: {target}")
         elif target.exists() and target != source:
-            blockers.append(f"删除目录中已存在同名文件夹: {target}")
+            blockers.append(f".delete 目录中已存在同名文件夹: {target}")
         targets.add(target)
         cleanup_dirs.append(
             {
@@ -268,7 +268,7 @@ def build_bulk_rename_plan(animes: list[Anime], season: int = 1) -> dict:
             previous = cleanup_targets.get(target)
             if previous and previous[0] != source:
                 blockers.append(
-                    f"作品「{previous[2]}」与「{anime.title}」的旧目录将写入同一删除目录: {target}"
+                    f"作品「{previous[2]}」与「{anime.title}」的旧目录将写入同一 .delete 目录: {target}"
                 )
             else:
                 cleanup_sources.add(source)

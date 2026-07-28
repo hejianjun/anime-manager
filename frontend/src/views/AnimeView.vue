@@ -120,7 +120,7 @@ async function previewRename() {
 
 async function renameFiles() {
   if (!selected.value || renamePreview.value?.blockers?.length) return
-  await ElMessageBox.confirm('媒体文件将移动到作品目录，原作品文件夹随后移入“删除目录”，不会覆盖现有文件。确认继续？', '批量重命名确认', { type: 'warning' })
+  await ElMessageBox.confirm('媒体文件将移动到作品目录，原作品文件夹随后移入隐藏目录“.delete”，不会覆盖现有文件。确认继续？', '批量重命名确认', { type: 'warning' })
   busy.value = true
   try {
     const result = (await api.post(`/anime/${selected.value.id}/rename`, { season: renameSeason.value })).data
@@ -147,7 +147,7 @@ async function renameAllFiles() {
     || (!bulkRenamePreview.value?.changed_count && !bulkRenamePreview.value?.cleanup_count)
   ) return
   await ElMessageBox.confirm(
-    `将处理 ${bulkRenamePreview.value.changed_count} 个媒体文件，并把 ${bulkRenamePreview.value.cleanup_count} 个旧文件夹移入“删除目录”。确认继续？`,
+    `将处理 ${bulkRenamePreview.value.changed_count} 个媒体文件，并把 ${bulkRenamePreview.value.cleanup_count} 个旧文件夹移入隐藏目录“.delete”。确认继续？`,
     '全部作品批量重命名确认',
     { type: 'warning' },
   )
@@ -281,7 +281,7 @@ onMounted(load)
       class="cleanup-preview"
       type="warning"
       :closable="false"
-      title="文件处理成功后，下列旧文件夹将移入删除目录"
+      title="文件处理成功后，下列旧文件夹将移入隐藏目录 .delete"
     >
       <div v-for="item in renamePreview.cleanup_dirs" :key="item.source">
         {{ item.source }} → {{ item.target }}
@@ -328,7 +328,7 @@ onMounted(load)
       class="cleanup-preview"
       type="warning"
       :closable="false"
-      title="文件处理成功后，旧文件夹将移入删除目录"
+      title="文件处理成功后，旧文件夹将移入隐藏目录 .delete"
     >
       <div v-for="item in bulkRenamePreview.cleanup_dirs" :key="item.source">
         {{ item.source }} → {{ item.target }}
