@@ -21,7 +21,13 @@ from .database import Base, SessionLocal, engine, get_db
 from .errors import AppError
 from .exporter import build_export_plan, export_anime, public_export_plan
 from .matching import confirm_group, refresh_anime, save_selections, search_group
-from .media_ops import bind_group_to_anime, build_rename_plan, execute_rename_plan
+from .media_ops import (
+    bind_group_to_anime,
+    build_bulk_rename_plan,
+    build_rename_plan,
+    execute_bulk_rename_plan,
+    execute_rename_plan,
+)
 from .models import (
     Anime,
     AppSetting,
@@ -545,6 +551,18 @@ def rename_files(anime_id: int, payload: RenameRequest, db: Session = Depends(ge
     if not anime:
         raise AppError("NOT_FOUND", "作品不存在", status_code=404)
     return execute_rename_plan(db, anime, payload.season)
+
+
+@app.post("/api/anime/rename-preview")
+def rename_all_preview(payload: RenameRequest, db: Session = Depends(get_db)):
+    animes = db.scalars(_anime_query().order_by(Anime.title)).unique().all()
+    return build_bulk_rename_plan(list(animes), payload.season)
+
+
+@app.post("/api/anime/rename")
+def rename_all_files(payload: RenameRequest, db: Session = Depends(get_db)):
+    animes = db.scalars(_anime_query().order_by(Anime.title)).unique().all()
+    return execute_bulk_rename_plan(db, list(animes), payload.season)
 
 
 @app.get("/api/anime/{anime_id}/export-preview")

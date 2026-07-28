@@ -4,7 +4,13 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
 from app.database import Base
-from app.media_ops import bind_group_to_anime, build_rename_plan, execute_rename_plan
+from app.media_ops import (
+    bind_group_to_anime,
+    build_bulk_rename_plan,
+    build_rename_plan,
+    execute_bulk_rename_plan,
+    execute_rename_plan,
+)
 from app.models import Anime, LibraryRoot, MatchGroup, MediaFile
 
 
@@ -73,3 +79,59 @@ def test_rename_plan_and_execute_move_files(tmp_path: Path) -> None:
         assert not source.exists()
         assert media.path == str(target)
         assert media.relative_path == str(target.relative_to(tmp_path))
+
+
+def test_bulk_rename_preview_and_execute_all_anime(tmp_path: Path) -> None:
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        root = LibraryRoot(path=str(tmp_path))
+        first = Anime(title="作品一")
+        second = Anime(title="作品二")
+        db.add_all([root, first, second])
+        db.flush()
+        first_source = tmp_path / "incoming" / "First E01.mkv"
+        second_source = tmp_path / "incoming" / "Second E02.mkv"
+        first_source.parent.mkdir()
+        first_source.write_bytes(b"first")
+        second_source.write_bytes(b"second")
+        first_media = add_media(db, root, first_source, 1)
+        second_media = add_media(db, root, second_source, 2)
+        first_media.anime_id = first.id
+        second_media.anime_id = second.id
+        db.commit()
+        db.refresh(first)
+        db.refresh(second)
+
+        plan = build_bulk_rename_plan([first, second], 1)
+        assert plan["anime_count"] == 2
+        assert plan["changed_count"] == 2
+        assert plan["blockers"] == []
+        assert {item["anime_title"] for item in plan["files"]} == {"作品一", "作品二"}
+
+        result = execute_bulk_rename_plan(db, [first, second], 1)
+
+        assert result["anime_count"] == 2
+        assert len(result["moved"]) == 2
+        assert all(Path(path).exists() for path in result["moved"])
+        assert not first_source.exists()
+        assert not second_source.exists()
+
+
+def test_bulk_rename_skips_anime_without_present_files(tmp_path: Path) -> None:
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        anime = Anime(title="没有文件")
+        db.add(anime)
+        db.commit()
+        db.refresh(anime)
+
+        plan = build_bulk_rename_plan([anime], 1)
+
+        assert plan["anime_count"] == 0
+        assert plan["files"] == []
+        assert plan["blockers"] == []
+        assert plan["skipped"] == [
+            {"anime_id": anime.id, "title": "没有文件", "reason": "没有可用媒体文件"}
+        ]

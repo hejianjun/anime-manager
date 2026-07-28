@@ -1,10 +1,11 @@
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { api, type Anime } from '../api'
-import { hasExportBlockers } from '../utils'
+import { getEpisodeHealth, hasExportBlockers, missingEpisodeText } from '../utils'
 
 const items = ref<Anime[]>([])
+const issueFilters = ref<Array<'missing' | 'unfilled'>>([])
 const selected = ref<Anime | null>(null)
 const detailOpen = ref(false)
 const previewOpen = ref(false)
@@ -14,7 +15,32 @@ const busy = ref(false)
 const renameOpen = ref(false)
 const renamePreview = ref<any>(null)
 const renameSeason = ref(1)
+const bulkRenameOpen = ref(false)
+const bulkRenamePreview = ref<any>(null)
+const bulkRenameSeason = ref(1)
 const coverErrors = ref<Record<number, boolean>>({})
+
+const itemHealth = computed(() =>
+  Object.fromEntries(items.value.map(item => [item.id, getEpisodeHealth(item)])),
+)
+const filteredItems = computed(() => {
+  if (!issueFilters.value.length) return items.value
+  return items.value.filter((item) => {
+    const health = itemHealth.value[item.id]
+    return issueFilters.value.some(filter =>
+      filter === 'missing' ? health.missingEpisodes.length > 0 : health.unfilledCount > 0,
+    )
+  })
+})
+const missingAnimeCount = computed(() =>
+  items.value.filter(item => itemHealth.value[item.id].missingEpisodes.length > 0).length,
+)
+const unfilledAnimeCount = computed(() =>
+  items.value.filter(item => itemHealth.value[item.id].unfilledCount > 0).length,
+)
+const bulkChangedFiles = computed(() =>
+  (bulkRenamePreview.value?.files || []).filter((item: any) => item.changed),
+)
 
 function markCoverError(animeId: number) {
   coverErrors.value[animeId] = true
@@ -100,14 +126,54 @@ async function renameFiles() {
   finally { busy.value = false }
 }
 
+async function previewBulkRename() {
+  busy.value = true
+  try {
+    bulkRenamePreview.value = (await api.post('/anime/rename-preview', { season: bulkRenameSeason.value })).data
+    bulkRenameOpen.value = true
+  } catch (error) { ElMessage.error((error as Error).message) }
+  finally { busy.value = false }
+}
+
+async function renameAllFiles() {
+  if (bulkRenamePreview.value?.blockers?.length || !bulkRenamePreview.value?.changed_count) return
+  await ElMessageBox.confirm(
+    `将移动并重命名 ${bulkRenamePreview.value.changed_count} 个视频，过程中不会覆盖已有文件。确认继续？`,
+    '全部作品批量重命名确认',
+    { type: 'warning' },
+  )
+  busy.value = true
+  try {
+    const result = (await api.post('/anime/rename', { season: bulkRenameSeason.value })).data
+    ElMessage.success(`已处理 ${result.anime_count} 部作品，移动并重命名 ${result.moved.length} 个视频`)
+    bulkRenameOpen.value = false
+    await load()
+  } catch (error) { ElMessage.error((error as Error).message) }
+  finally { busy.value = false }
+}
+
 onMounted(load)
 </script>
 
 <template>
   <section class="panel">
-    <div class="panel-title"><div><p class="eyebrow">CATALOG</p><h2>已绑定作品</h2></div><span class="muted">{{ items.length }} 部</span></div>
+    <div class="panel-title">
+      <div><p class="eyebrow">CATALOG</p><h2>已绑定作品</h2></div>
+      <div class="panel-actions">
+        <span class="muted">{{ filteredItems.length }} / {{ items.length }} 部</span>
+        <el-button :loading="busy" @click="previewBulkRename">全部批量重命名</el-button>
+      </div>
+    </div>
+    <div class="catalog-filter">
+      <span class="muted">仅显示</span>
+      <el-checkbox-group v-model="issueFilters">
+        <el-checkbox-button value="missing">缺集 {{ missingAnimeCount }}</el-checkbox-button>
+        <el-checkbox-button value="unfilled">集数未填写 {{ unfilledAnimeCount }}</el-checkbox-button>
+      </el-checkbox-group>
+      <el-button v-if="issueFilters.length" text @click="issueFilters = []">显示全部</el-button>
+    </div>
     <div class="anime-grid">
-      <article v-for="item in items" :key="item.id" class="anime-card" @click="show(item)">
+      <article v-for="item in filteredItems" :key="item.id" class="anime-card" @click="show(item)">
         <div class="anime-cover">
           <img
             v-if="item.cover_url && !coverErrors[item.id]"
@@ -126,11 +192,18 @@ onMounted(load)
           <div class="anime-meta">
             <el-tag v-if="item.year">{{ item.year }}</el-tag>
             <el-tag type="info">{{ item.files.length }} 个文件</el-tag>
+            <el-tag v-if="itemHealth[item.id].missingEpisodes.length" type="danger">
+              {{ missingEpisodeText(itemHealth[item.id].missingEpisodes) }}
+            </el-tag>
+            <el-tag v-if="itemHealth[item.id].unfilledCount" type="warning">
+              {{ itemHealth[item.id].unfilledCount }} 个文件未填集数
+            </el-tag>
             <el-tag v-for="mapping in item.mappings" :key="mapping.source" :type="mapping.is_mock ? 'warning' : 'success'">{{ mapping.source }}</el-tag>
           </div>
         </div>
       </article>
       <div v-if="!items.length" class="empty">确认候选后，作品会显示在这里</div>
+      <div v-else-if="!filteredItems.length" class="empty">没有符合当前条件的作品</div>
     </div>
   </section>
 
@@ -190,6 +263,44 @@ onMounted(load)
     <template #footer>
       <el-button @click="renameOpen = false">取消</el-button>
       <el-button type="primary" :disabled="Boolean(renamePreview?.blockers?.length)" :loading="busy" @click="renameFiles">确认移动并重命名</el-button>
+    </template>
+  </el-dialog>
+
+  <el-dialog v-model="bulkRenameOpen" width="min(1100px, 96vw)" title="全部已匹配作品批量重命名预览">
+    <div class="toolbar">
+      <span>季度</span>
+      <el-input-number v-model="bulkRenameSeason" :min="0" :max="99" @change="previewBulkRename" />
+      <span class="muted">
+        {{ bulkRenamePreview?.anime_count || 0 }} 部作品 ·
+        {{ bulkRenamePreview?.changed_count || 0 }} 个文件需要处理 ·
+        {{ bulkRenamePreview?.skipped?.length || 0 }} 部无可用文件
+      </span>
+    </div>
+    <el-alert v-if="bulkRenamePreview?.blockers?.length" type="error" :closable="false" title="存在阻塞项">
+      <div v-for="item in bulkRenamePreview.blockers" :key="item">{{ item }}</div>
+    </el-alert>
+    <el-alert
+      v-else-if="!bulkRenamePreview?.changed_count"
+      type="success"
+      :closable="false"
+      title="所有文件已经符合命名规则，无需处理"
+    />
+    <el-table :data="bulkChangedFiles" size="small" max-height="560">
+      <el-table-column prop="anime_title" label="作品" min-width="190" show-overflow-tooltip />
+      <el-table-column prop="episode" label="集" width="70" />
+      <el-table-column prop="source" label="当前路径" min-width="300" show-overflow-tooltip />
+      <el-table-column prop="target" label="目标路径" min-width="340" show-overflow-tooltip />
+    </el-table>
+    <template #footer>
+      <el-button @click="bulkRenameOpen = false">取消</el-button>
+      <el-button
+        type="primary"
+        :disabled="Boolean(bulkRenamePreview?.blockers?.length) || !bulkRenamePreview?.changed_count"
+        :loading="busy"
+        @click="renameAllFiles"
+      >
+        确认全部移动并重命名
+      </el-button>
     </template>
   </el-dialog>
 
