@@ -41,6 +41,12 @@ const unfilledAnimeCount = computed(() =>
 const bulkChangedFiles = computed(() =>
   (bulkRenamePreview.value?.files || []).filter((item: any) => item.changed),
 )
+const renameKindLabels: Record<string, string> = {
+  video: '视频',
+  nfo: 'NFO',
+  subtitle: '字幕',
+  image: '图片',
+}
 
 function markCoverError(animeId: number) {
   coverErrors.value[animeId] = true
@@ -114,11 +120,11 @@ async function previewRename() {
 
 async function renameFiles() {
   if (!selected.value || renamePreview.value?.blockers?.length) return
-  await ElMessageBox.confirm('视频将移动到作品目录并重命名，不会覆盖现有文件。确认继续？', '批量重命名确认', { type: 'warning' })
+  await ElMessageBox.confirm('视频及同名 NFO、SRT、JPG 文件将移动到作品目录并重命名，不会覆盖现有文件。确认继续？', '批量重命名确认', { type: 'warning' })
   busy.value = true
   try {
     const result = (await api.post(`/anime/${selected.value.id}/rename`, { season: renameSeason.value })).data
-    ElMessage.success(`已移动并重命名 ${result.moved.length} 个视频`)
+    ElMessage.success(`已移动并重命名 ${result.moved.length} 个文件`)
     renameOpen.value = false
     selected.value = (await api.get(`/anime/${selected.value.id}`)).data
     await load()
@@ -138,14 +144,14 @@ async function previewBulkRename() {
 async function renameAllFiles() {
   if (bulkRenamePreview.value?.blockers?.length || !bulkRenamePreview.value?.changed_count) return
   await ElMessageBox.confirm(
-    `将移动并重命名 ${bulkRenamePreview.value.changed_count} 个视频，过程中不会覆盖已有文件。确认继续？`,
+    `将移动并重命名 ${bulkRenamePreview.value.changed_count} 个视频/旁挂文件，过程中不会覆盖已有文件。确认继续？`,
     '全部作品批量重命名确认',
     { type: 'warning' },
   )
   busy.value = true
   try {
     const result = (await api.post('/anime/rename', { season: bulkRenameSeason.value })).data
-    ElMessage.success(`已处理 ${result.anime_count} 部作品，移动并重命名 ${result.moved.length} 个视频`)
+    ElMessage.success(`已处理 ${result.anime_count} 部作品，移动并重命名 ${result.moved.length} 个文件`)
     bulkRenameOpen.value = false
     await load()
   } catch (error) { ElMessage.error((error as Error).message) }
@@ -259,6 +265,9 @@ onMounted(load)
       <div v-for="item in renamePreview.blockers" :key="item">{{ item }}</div>
     </el-alert>
     <el-table :data="renamePreview?.files || []" size="small">
+      <el-table-column label="类型" width="90">
+        <template #default="{ row }">{{ renameKindLabels[row.kind] || row.kind }}</template>
+      </el-table-column>
       <el-table-column prop="episode" label="集" width="70" />
       <el-table-column prop="episode_title" label="集标题" min-width="190" show-overflow-tooltip />
       <el-table-column prop="source" label="当前路径" min-width="300" show-overflow-tooltip />
@@ -291,6 +300,9 @@ onMounted(load)
     />
     <el-table :data="bulkChangedFiles" size="small" max-height="560">
       <el-table-column prop="anime_title" label="作品" min-width="190" show-overflow-tooltip />
+      <el-table-column label="类型" width="90">
+        <template #default="{ row }">{{ renameKindLabels[row.kind] || row.kind }}</template>
+      </el-table-column>
       <el-table-column prop="episode" label="集" width="70" />
       <el-table-column prop="episode_title" label="集标题" min-width="190" show-overflow-tooltip />
       <el-table-column prop="source" label="当前路径" min-width="300" show-overflow-tooltip />

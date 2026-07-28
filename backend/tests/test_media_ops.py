@@ -82,6 +82,100 @@ def test_rename_plan_and_execute_move_files(tmp_path: Path) -> None:
         assert media.relative_path == str(target.relative_to(tmp_path))
 
 
+def test_rename_moves_and_renames_video_sidecars(tmp_path: Path) -> None:
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        root = LibraryRoot(path=str(tmp_path))
+        anime = Anime(title="作品名")
+        db.add_all([root, anime])
+        db.flush()
+        source = tmp_path / "incoming" / "Example E01.MKV"
+        source.parent.mkdir()
+        source.write_bytes(b"video")
+        sidecars = {
+            source.with_suffix(".nfo"): b"nfo",
+            source.with_suffix(".srt"): b"subtitle",
+            source.with_suffix(".jpg"): b"image",
+            source.with_name(f"{source.stem}.ja.srt"): b"japanese subtitle",
+            source.with_name(f"{source.stem}-thumb.jpg"): b"thumbnail",
+        }
+        for path, content in sidecars.items():
+            path.write_bytes(content)
+        directory_sidecars = {
+            source.parent / "poster.jpg": b"poster",
+            source.parent / "tvshow.nfo": b"tvshow",
+            source.parent / "metadata" / "artwork.jpg": b"metadata artwork",
+        }
+        for path, content in directory_sidecars.items():
+            path.parent.mkdir(exist_ok=True)
+            path.write_bytes(content)
+        media = add_media(db, root, source, 1)
+        media.anime_id = anime.id
+        db.commit()
+        db.refresh(anime)
+
+        plan = build_rename_plan(anime, 1)
+
+        assert plan["blockers"] == []
+        assert sorted(item["kind"] for item in plan["files"]) == [
+            "image",
+            "image",
+            "image",
+            "image",
+            "nfo",
+            "nfo",
+            "subtitle",
+            "subtitle",
+            "video",
+        ]
+        assert {Path(item["target"]).name for item in plan["files"]} == {
+            "作品名 - S01E01.mkv",
+            "作品名 - S01E01.jpg",
+            "作品名 - S01E01.srt",
+            "作品名 - S01E01.ja.srt",
+            "作品名 - S01E01.nfo",
+            "作品名 - S01E01-thumb.jpg",
+            "poster.jpg",
+            "tvshow.nfo",
+            "artwork.jpg",
+        }
+
+        result = execute_rename_plan(db, anime, 1)
+
+        assert len(result["moved"]) == 9
+        assert all(Path(path).exists() for path in result["moved"])
+        assert all(not path.exists() for path in [source, *sidecars])
+        assert all(not path.exists() for path in directory_sidecars)
+        assert (tmp_path / "作品名" / "metadata" / "artwork.jpg").exists()
+        assert media.path.endswith("作品名 - S01E01.mkv")
+
+
+def test_rename_sidecar_target_conflict_blocks_move(tmp_path: Path) -> None:
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        root = LibraryRoot(path=str(tmp_path))
+        anime = Anime(title="作品名")
+        db.add_all([root, anime])
+        db.flush()
+        source = tmp_path / "incoming" / "Example E01.mkv"
+        source.parent.mkdir()
+        source.write_bytes(b"video")
+        source.with_suffix(".srt").write_bytes(b"subtitle")
+        target_subtitle = tmp_path / "作品名" / "作品名 - S01E01.srt"
+        target_subtitle.parent.mkdir()
+        target_subtitle.write_bytes(b"existing")
+        media = add_media(db, root, source, 1)
+        media.anime_id = anime.id
+        db.commit()
+        db.refresh(anime)
+
+        plan = build_rename_plan(anime, 1)
+
+        assert plan["blockers"] == [f"目标文件已存在: {target_subtitle}"]
+
+
 def test_bulk_rename_preview_and_execute_all_anime(tmp_path: Path) -> None:
     engine = create_engine("sqlite:///:memory:")
     Base.metadata.create_all(engine)

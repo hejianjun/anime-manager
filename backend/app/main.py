@@ -59,10 +59,19 @@ from .schemas import (
 from .scrapers import SCRAPERS, AniDBScraper
 
 scheduler = AsyncIOScheduler(timezone="UTC")
+SCRAPER_NAMES = tuple(SCRAPERS)
+
+
+def enabled_scraper_names(db: Session) -> list[str]:
+    row = db.get(AppSetting, "enabled_scrapers")
+    configured = row.value if row and isinstance(row.value, list) else list(SCRAPER_NAMES)
+    return [name for name in SCRAPER_NAMES if name in configured]
 
 
 async def scheduled_title_refresh() -> None:
     with SessionLocal() as db:
+        if "anidb" not in enabled_scraper_names(db):
+            return
         try:
             await SCRAPERS["anidb"].refresh_titles(db)
         except AppError:
@@ -74,11 +83,12 @@ async def scheduled_metadata_refresh() -> None:
         enabled = db.get(AppSetting, "scheduled_refresh")
         if not enabled or not enabled.value:
             return
+        enabled_sources = enabled_scraper_names(db)
         anime_ids = db.scalars(select(Anime.id)).all()
         for anime_id in anime_ids:
             anime = db.scalar(_anime_query().where(Anime.id == anime_id))
             if anime:
-                await refresh_anime(db, anime)
+                await refresh_anime(db, anime, enabled_sources)
 
 
 @asynccontextmanager
@@ -413,8 +423,27 @@ async def run_search(group_id: int, payload: SearchRequest, db: Session = Depend
     group = db.get(MatchGroup, group_id)
     if not group:
         raise AppError("NOT_FOUND", "匹配分组不存在", status_code=404)
-    results, errors = await search_group(
-        db, group, payload.keyword or group.search_keyword, payload.sources
+    enabled = enabled_scraper_names(db)
+    requested = payload.sources if payload.sources is not None else enabled
+    sources = [source for source in requested if source in enabled]
+    results, errors = await search_group(db, group, payload.keyword or group.search_keyword, sources)
+    errors.extend(
+        {
+            "source": source,
+            "code": "UNKNOWN_SOURCE",
+            "message": "未知数据源",
+        }
+        for source in requested
+        if source not in SCRAPERS
+    )
+    errors.extend(
+        {
+            "source": source,
+            "code": "SOURCE_DISABLED",
+            "message": "该数据源已在设置中停用",
+        }
+        for source in requested
+        if source in SCRAPERS and source not in enabled
     )
     return {
         "items": [
@@ -454,7 +483,7 @@ async def confirm(group_id: int, db: Session = Depends(get_db)):
     )
     if not group:
         raise AppError("NOT_FOUND", "匹配分组不存在", status_code=404)
-    anime = await confirm_group(db, group)
+    anime = await confirm_group(db, group, enabled_scraper_names(db))
     return db.scalar(
         select(Anime)
         .options(
@@ -534,7 +563,7 @@ async def refresh(anime_id: int, db: Session = Depends(get_db)):
     anime = db.scalar(_anime_query().where(Anime.id == anime_id))
     if not anime:
         raise AppError("NOT_FOUND", "作品不存在", status_code=404)
-    return await refresh_anime(db, anime)
+    return await refresh_anime(db, anime, enabled_scraper_names(db))
 
 
 @app.post("/api/anime/{anime_id}/rename-preview")
@@ -582,6 +611,7 @@ async def run_export(anime_id: int, payload: ExportRequest, db: Session = Depend
 
 
 DEFAULT_SETTINGS: dict[str, Any] = {
+    "enabled_scrapers": list(SCRAPER_NAMES),
     "anidb_client": "",
     "anidb_clientver": 1,
     "dmm_api_id": "",
@@ -614,6 +644,8 @@ def patch_settings(payload: SettingsPatch, db: Session = Depends(get_db)):
 
 @app.post("/api/sources/anidb/titles/refresh")
 async def refresh_titles(db: Session = Depends(get_db)):
+    if "anidb" not in enabled_scraper_names(db):
+        raise AppError("SOURCE_DISABLED", "AniDB 爬虫已在设置中停用", status_code=409)
     scraper = SCRAPERS["anidb"]
     assert isinstance(scraper, AniDBScraper)
     return await scraper.refresh_titles(db)

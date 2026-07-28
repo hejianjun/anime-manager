@@ -89,6 +89,7 @@ a { color: inherit; text-decoration: none; }
 .code-block { max-height: 360px; overflow: auto; white-space: pre-wrap; color: #b8c4d2; background: #0c1117; border: 1px solid #26303c; padding: 16px; font-family: "Cascadia Code", monospace; font-size: 11px; }
 .empty { padding: 54px 20px; text-align: center; color: var(--muted); }
 .setting-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 28px; }
+.setting-help { width: 100%; margin: 6px 0 0; color: var(--muted); font-size: 12px; line-height: 1.6; }
 
 .el-button--primary { --el-button-bg-color: #2b7168; --el-button-border-color: #2b7168; --el-button-hover-bg-color: #36887d; --el-button-hover-border-color: #36887d; }
 .el-input__wrapper, .el-select__wrapper { background: #11171e !important; box-shadow: 0 0 0 1px var(--line) inset !important; }

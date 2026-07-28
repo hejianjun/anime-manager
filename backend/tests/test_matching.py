@@ -2,6 +2,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
 from app.database import Base
+from app.errors import AppError
 from app.matching import confirm_group
 from app.models import Anime, LibraryRoot, MatchGroup, MediaFile, ScrapeCandidate, SourceMapping
 from app.scrapers import SCRAPERS, SourceMetadata
@@ -65,3 +66,39 @@ async def test_confirm_reuses_anime_with_existing_source_mapping(monkeypatch) ->
         assert group.status == "confirmed"
         assert result.episode_titles == {"1": "第一話", "2": "第二話"}
         assert db.query(Anime).count() == 1
+
+
+async def test_confirm_ignores_candidates_from_disabled_scrapers() -> None:
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+
+    with Session(engine) as db:
+        root = LibraryRoot(path="library")
+        db.add(root)
+        db.flush()
+        group = MatchGroup(
+            library_root_id=root.id,
+            group_key="disabled-source",
+            display_title="Example",
+            search_keyword="Example",
+        )
+        db.add(group)
+        db.flush()
+        db.add(
+            ScrapeCandidate(
+                match_group_id=group.id,
+                source="getchu",
+                source_id="123",
+                title="Example",
+                score=1,
+                selected=True,
+            )
+        )
+        db.commit()
+
+        try:
+            await confirm_group(db, group, ["anidb"])
+        except AppError as exc:
+            assert exc.code == "NO_SELECTION"
+        else:
+            raise AssertionError("disabled candidate should not be confirmed")

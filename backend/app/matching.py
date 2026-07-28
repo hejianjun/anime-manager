@@ -106,13 +106,17 @@ def _apply_metadata(anime: Anime, metadata: SourceMetadata) -> None:
     anime.field_provenance = provenance
 
 
-async def confirm_group(db: Session, group: MatchGroup) -> Anime:
+async def confirm_group(
+    db: Session, group: MatchGroup, enabled_sources: list[str] | None = None
+) -> Anime:
     selected = db.scalars(
         select(ScrapeCandidate).where(
             ScrapeCandidate.match_group_id == group.id,
             ScrapeCandidate.selected.is_(True),
         )
     ).all()
+    if enabled_sources is not None:
+        selected = [item for item in selected if item.source in enabled_sources]
     if not selected:
         raise AppError("NO_SELECTION", "请至少选择一个候选结果")
     anidb = next((item for item in selected if item.source == "anidb"), None)
@@ -182,8 +186,12 @@ async def confirm_group(db: Session, group: MatchGroup) -> Anime:
         raise
 
 
-async def refresh_anime(db: Session, anime: Anime) -> Anime:
+async def refresh_anime(
+    db: Session, anime: Anime, enabled_sources: list[str] | None = None
+) -> Anime:
     for mapping in anime.mappings:
+        if enabled_sources is not None and mapping.source not in enabled_sources:
+            continue
         try:
             metadata = await SCRAPERS[mapping.source].detail(db, mapping.source_id)
             _apply_metadata(anime, metadata)

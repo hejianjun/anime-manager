@@ -10,13 +10,13 @@ const searching = ref(false)
 const confirming = ref(false)
 const keyword = ref('')
 const selections = ref<Record<string, number | null>>({ anidb: null, dmm: null, getchu: null })
-const sources = ['anidb', 'dmm', 'getchu']
+const sources = ref<string[]>([])
 const animeItems = ref<Anime[]>([])
 const existingAnimeId = ref<number | null>(null)
 const coverErrors = ref<Record<number, boolean>>({})
 const playerOpen = ref(false)
 const playerFile = ref<MediaFile | null>(null)
-const bySource = computed(() => groupCandidates(active.value?.candidates || [], sources))
+const bySource = computed(() => groupCandidates(active.value?.candidates || [], sources.value))
 const playerUrl = computed(() => playerFile.value ? `/api/media-files/${playerFile.value.id}/stream` : '')
 
 async function loadGroups() {
@@ -32,6 +32,11 @@ async function loadGroups() {
 
 async function loadAnime() {
   animeItems.value = (await api.get('/anime', { params: { page_size: 100 } })).data.items
+}
+
+async function loadSettings() {
+  const settings = (await api.get('/settings')).data
+  sources.value = settings.enabled_scrapers || ['anidb', 'dmm', 'getchu']
 }
 
 function selectGroup(group: MatchGroup) {
@@ -81,7 +86,7 @@ async function search() {
     await api.patch(`/match-groups/${active.value.id}`, { search_keyword: keyword.value })
     const response = await api.post(`/match-groups/${active.value.id}/search`, {
       keyword: keyword.value,
-      sources,
+      sources: sources.value,
     })
     active.value.candidates = response.data.items
     selections.value = { anidb: null, dmm: null, getchu: null }
@@ -107,7 +112,7 @@ async function confirm() {
   } finally { confirming.value = false }
 }
 
-onMounted(() => Promise.all([loadGroups(), loadAnime()]))
+onMounted(() => Promise.all([loadGroups(), loadAnime(), loadSettings()]))
 </script>
 
 <template>
@@ -131,8 +136,9 @@ onMounted(() => Promise.all([loadGroups(), loadAnime()]))
         </div>
         <div class="toolbar">
           <el-input v-model="keyword" placeholder="搜索关键词" @keyup.enter="search" />
-          <el-button type="primary" :loading="searching" @click="search">搜索全部来源</el-button>
+          <el-button type="primary" :loading="searching" :disabled="!sources.length" @click="search">搜索已启用来源</el-button>
         </div>
+        <el-alert v-if="!sources.length" type="warning" :closable="false" title="当前未启用任何爬虫，请先到设置页选择。" />
         <div class="source-section">
           <div class="source-head">原始视频</div>
           <div v-for="file in active.files" :key="file.id" class="media-preview-row">
