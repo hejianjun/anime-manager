@@ -116,6 +116,7 @@ def test_scan_merges_pending_files_in_same_directory(tmp_path: Path, monkeypatch
             str(first.resolve()),
             str(second.resolve()),
         }
+        assert {item.episode for item in groups[0].files} == {1, 2}
         assert db.get(TaskRecord, task.id).result["merged_groups"] == 1
         assert probed == []
 

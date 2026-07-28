@@ -15,6 +15,19 @@ def test_parse_volume() -> None:
     assert parsed.episode == 2
 
 
+def test_parse_hash_episode() -> None:
+    parsed = parse_filename(Path("OVA おしかけ!爆乳ギャルハーレム性活 #2.mp4"))
+    assert parsed.title == "OVA おしかけ!爆乳ギャルハーレム性活"
+    assert parsed.episode == 2
+
+
+def test_parse_fullwidth_hash_episode_with_title() -> None:
+    parsed = parse_filename(Path("作品名 ＃01 - 集标题.mp4"))
+    assert parsed.title == "作品名"
+    assert parsed.episode == 1
+    assert parsed.episode_title == "集标题"
+
+
 def test_normalize_preserves_cjk() -> None:
     assert normalize_title("星界の紋章：OVA") == "星界の紋章 ova"
 
