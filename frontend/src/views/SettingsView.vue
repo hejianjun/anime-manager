@@ -6,9 +6,10 @@ import { api } from '../api'
 const form = reactive({
   anidb_client: '',
   anidb_clientver: 1,
+  dmm_api_id: '',
+  dmm_affiliate_id: '',
   proxy_url: '',
   request_interval_seconds: 2.1,
-  demo_scrapers: true,
   scheduled_refresh: false,
 })
 const status = ref<any>({})
@@ -53,13 +54,18 @@ onMounted(load)
         <el-form-item label="AniDB clientver">
           <el-input-number v-model="form.anidb_clientver" :min="1" />
         </el-form-item>
+        <el-form-item label="DMM API ID">
+          <el-input v-model="form.dmm_api_id" type="password" show-password placeholder="DMM Web Service API ID" />
+        </el-form-item>
+        <el-form-item label="DMM API 专用 Affiliate ID">
+          <el-input v-model="form.dmm_affiliate_id" placeholder="例如 example-990" />
+        </el-form-item>
         <el-form-item label="代理 URL">
           <el-input v-model="form.proxy_url" placeholder="可选，例如 http://127.0.0.1:7890" />
         </el-form-item>
         <el-form-item label="请求间隔（秒）">
           <el-input-number v-model="form.request_interval_seconds" :min="2" :step="0.1" />
         </el-form-item>
-        <el-form-item><el-switch v-model="form.demo_scrapers" /> <span style="margin-left:10px">启用 DMM/Getchu 模拟候选</span></el-form-item>
         <el-form-item><el-switch v-model="form.scheduled_refresh" /> <span style="margin-left:10px">启用作品定期刷新</span></el-form-item>
         <el-button type="primary" :loading="busy" @click="save">保存设置</el-button>
       </el-form>
@@ -69,8 +75,8 @@ onMounted(load)
         <p>最后刷新：{{ status.anidb_titles_refreshed_at ? new Date(status.anidb_titles_refreshed_at).toLocaleString() : '尚未下载' }}</p>
         <el-button :loading="busy" @click="refreshTitles">刷新标题库</el-button>
         <el-alert style="margin-top:22px" type="info" :closable="false" title="client/clientver 仅用于确认后的详情请求；未配置时仍可搜索标题。" />
+        <el-alert style="margin-top:12px" type="info" :closable="false" title="DMM 搜索需要 API ID 与 API 专用 Affiliate ID；Getchu 无需账号配置。" />
       </div>
     </div>
   </section>
 </template>
-

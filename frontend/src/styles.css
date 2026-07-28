@@ -56,10 +56,16 @@ a { color: inherit; text-decoration: none; }
 .file-pill { font-size: 11px; color: var(--muted); margin-top: 5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .source-section { margin-top: 20px; }
 .source-head { display: flex; align-items: center; gap: 9px; margin-bottom: 10px; text-transform: uppercase; letter-spacing: .12em; color: #b7c1ce; font-size: 11px; }
-.candidate { display: grid; grid-template-columns: 28px 1fr auto; align-items: center; gap: 12px; padding: 14px; border: 1px solid var(--line); margin-bottom: 8px; background: #11171e; }
+.candidate { display: grid; grid-template-columns: 28px minmax(0, 1fr) auto; align-items: center; gap: 12px; padding: 14px; border: 1px solid var(--line); margin-bottom: 8px; background: #11171e; }
 .candidate.selected { border-color: var(--cyan); }
 .candidate input[type="radio"] { appearance: none; width: 17px; height: 17px; margin: 0; border: 1px solid #718093; border-radius: 50%; cursor: pointer; }
 .candidate input[type="radio"]:checked { border: 5px solid var(--cyan); background: #0d1117; }
+.candidate-cover { grid-column: 2 / -1; width: 180px; aspect-ratio: 2 / 3; display: grid; place-items: center; overflow: hidden; border: 1px solid var(--line); background: linear-gradient(145deg, #1e2c35, #0f151c); color: var(--muted); font-size: 12px; }
+.candidate-cover img { width: 100%; height: 100%; object-fit: cover; }
+.media-preview-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 12px; padding: 10px 12px; border: 1px solid var(--line); border-bottom: 0; background: #11171e; }
+.media-preview-row:last-child { border-bottom: 1px solid var(--line); }
+.media-preview-row > span { overflow: hidden; color: var(--muted); font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+.media-player { display: block; width: 100%; max-height: 72vh; background: #05080b; }
 .existing-bind { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; margin-top: 22px; padding: 16px; border: 1px solid var(--line); background: #11171e; }
 .existing-bind > div:first-child { margin-right: auto; }
 .score { color: var(--cyan); font-variant-numeric: tabular-nums; }

@@ -20,6 +20,13 @@ function markCoverError(animeId: number) {
   coverErrors.value[animeId] = true
 }
 
+function coverUrl(anime: Anime) {
+  const getchu = anime.mappings.find(item => item.source === 'getchu' && !item.is_mock)
+  return getchu
+    ? `/api/sources/getchu/${encodeURIComponent(getchu.source_id)}/cover`
+    : anime.cover_url
+}
+
 async function load() {
   items.value = (await api.get('/anime', { params: { page_size: 100 } })).data.items
 }
@@ -104,7 +111,7 @@ onMounted(load)
         <div class="anime-cover">
           <img
             v-if="item.cover_url && !coverErrors[item.id]"
-            :src="item.cover_url"
+            :src="coverUrl(item) || ''"
             :alt="`${item.title} 封面`"
             loading="lazy"
             referrerpolicy="no-referrer"
@@ -133,7 +140,7 @@ onMounted(load)
         <div class="anime-detail-cover">
           <img
             v-if="selected.cover_url && !coverErrors[selected.id]"
-            :src="selected.cover_url"
+            :src="coverUrl(selected) || ''"
             :alt="`${selected.title} 封面`"
             referrerpolicy="no-referrer"
             @error="markCoverError(selected.id)"

@@ -152,9 +152,10 @@ class AnimePatch(BaseModel):
 class SettingsPatch(BaseModel):
     anidb_client: str | None = None
     anidb_clientver: int | None = None
+    dmm_api_id: str | None = None
+    dmm_affiliate_id: str | None = None
     proxy_url: str | None = None
     request_interval_seconds: float | None = Field(default=None, ge=2)
-    demo_scrapers: bool | None = None
     scheduled_refresh: bool | None = None
 
 

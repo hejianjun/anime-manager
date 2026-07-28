@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
 import { ElMessage } from 'element-plus'
-import { api, type Anime, type Candidate, type MatchGroup } from '../api'
+import { api, type Anime, type Candidate, type MatchGroup, type MediaFile } from '../api'
 import { groupCandidates } from '../utils'
 
 const groups = ref<MatchGroup[]>([])
@@ -13,7 +13,11 @@ const selections = ref<Record<string, number | null>>({ anidb: null, dmm: null, 
 const sources = ['anidb', 'dmm', 'getchu']
 const animeItems = ref<Anime[]>([])
 const existingAnimeId = ref<number | null>(null)
+const coverErrors = ref<Record<number, boolean>>({})
+const playerOpen = ref(false)
+const playerFile = ref<MediaFile | null>(null)
 const bySource = computed(() => groupCandidates(active.value?.candidates || [], sources))
+const playerUrl = computed(() => playerFile.value ? `/api/media-files/${playerFile.value.id}/stream` : '')
 
 async function loadGroups() {
   groups.value = (await api.get('/match-groups', { params: { status: 'pending', page_size: 100 } })).data.items
@@ -30,6 +34,25 @@ function selectGroup(group: MatchGroup) {
   selections.value = { anidb: null, dmm: null, getchu: null }
   existingAnimeId.value = null
   group.candidates.filter(item => item.selected).forEach(item => selections.value[item.source] = item.id)
+}
+
+function markCoverError(candidateId: number) {
+  coverErrors.value[candidateId] = true
+}
+
+function candidateCoverUrl(item: Candidate) {
+  return item.source === 'getchu'
+    ? `/api/sources/getchu/${encodeURIComponent(item.source_id)}/cover`
+    : item.cover_url
+}
+
+function playMedia(file: MediaFile) {
+  playerFile.value = file
+  playerOpen.value = true
+}
+
+function closePlayer() {
+  playerFile.value = null
 }
 
 async function bindExisting() {
@@ -104,12 +127,33 @@ onMounted(() => Promise.all([loadGroups(), loadAnime()]))
           <el-input v-model="keyword" placeholder="搜索关键词" @keyup.enter="search" />
           <el-button type="primary" :loading="searching" @click="search">搜索全部来源</el-button>
         </div>
+        <div class="source-section">
+          <div class="source-head">原始视频</div>
+          <div v-for="file in active.files" :key="file.id" class="media-preview-row">
+            <span :title="file.relative_path">{{ file.relative_path }}</span>
+            <el-button size="small" @click="playMedia(file)">播放</el-button>
+          </div>
+        </div>
         <div v-for="source in sources" :key="source" class="source-section">
-          <div class="source-head">{{ source }} <el-tag v-if="source !== 'anidb'" size="small" type="warning">模拟</el-tag></div>
+          <div class="source-head">
+            {{ source }}
+            <el-tag v-if="source === 'dmm'" size="small" type="success">API</el-tag>
+            <el-tag v-if="source === 'getchu'" size="small" type="info">站内检索</el-tag>
+          </div>
           <label v-for="item in bySource[source] as Candidate[]" :key="item.id" class="candidate" :class="{ selected: selections[source] === item.id }">
             <input v-model="selections[source]" type="radio" :name="`candidate-${source}`" :value="item.id" :aria-label="`${item.title} · ID ${item.source_id}`" />
             <span><b>{{ item.title }}</b><small class="muted"> · ID {{ item.source_id }}</small></span>
             <span class="score">{{ Math.round(item.score * 100) }}%</span>
+            <div v-if="selections[source] === item.id" class="candidate-cover">
+              <img
+                v-if="item.cover_url && !coverErrors[item.id]"
+                :src="candidateCoverUrl(item) || ''"
+                :alt="`${item.title} 封面`"
+                referrerpolicy="no-referrer"
+                @error="markCoverError(item.id)"
+              >
+              <span v-else>暂无封面</span>
+            </div>
           </label>
           <div v-if="!bySource[source].length" class="muted">尚无候选</div>
         </div>
@@ -128,4 +172,16 @@ onMounted(() => Promise.all([loadGroups(), loadAnime()]))
       <div v-else class="empty">选择左侧分组开始匹配</div>
     </section>
   </div>
+
+  <el-dialog
+    v-model="playerOpen"
+    width="min(1000px, 96vw)"
+    :title="playerFile?.relative_path || '播放原始视频'"
+    destroy-on-close
+    @closed="closePlayer"
+  >
+    <video v-if="playerFile" class="media-player" :src="playerUrl" controls autoplay preload="metadata">
+      当前浏览器不支持播放该视频格式。
+    </video>
+  </el-dialog>
 </template>

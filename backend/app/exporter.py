@@ -6,6 +6,7 @@ import shutil
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import urlparse
 from xml.etree import ElementTree as ET
 
 import httpx
@@ -190,7 +191,21 @@ async def export_anime(db: Session, anime: Anime, overwrite: bool) -> dict:
             target = plan["_poster_dir"] / "poster.jpg"
             if target.exists() and not overwrite:
                 raise AppError("FILE_EXISTS", f"目标文件已存在: {target}", status_code=409)
-            async with httpx.AsyncClient(timeout=45, follow_redirects=True) as client:
+            hostname = (urlparse(anime.cover_url).hostname or "").lower()
+            getchu = hostname == "www.getchu.com" or hostname.endswith(".getchu.com")
+            async with httpx.AsyncClient(
+                timeout=45,
+                follow_redirects=True,
+                headers=(
+                    {
+                        "User-Agent": "AnimeManager/0.1 (local metadata client)",
+                        "Referer": "https://www.getchu.com/",
+                    }
+                    if getchu
+                    else None
+                ),
+                cookies={"getchu_adalt_flag": "getchu.com"} if getchu else None,
+            ) as client:
                 response = await client.get(anime.cover_url)
                 response.raise_for_status()
             mime = response.headers.get("content-type", "").split(";")[0]
@@ -223,4 +238,3 @@ async def export_anime(db: Session, anime: Anime, overwrite: bool) -> dict:
 
 def public_export_plan(plan: dict) -> dict:
     return {key: value for key, value in plan.items() if not key.startswith("_")}
-

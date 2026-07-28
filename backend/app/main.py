@@ -1,15 +1,17 @@
 from __future__ import annotations
 
 import asyncio
+import mimetypes
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
+import httpx
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from fastapi import BackgroundTasks, Depends, FastAPI, Query, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, selectinload
@@ -26,6 +28,8 @@ from .models import (
     LibraryRoot,
     MatchGroup,
     MediaFile,
+    ScrapeCandidate,
+    SourceMapping,
     TaskRecord,
 )
 from .scanner import scan_library
@@ -87,6 +91,15 @@ async def lifespan(_app: FastAPI):
                 },
             },
             synchronize_session=False,
+        )
+        db.query(ScrapeCandidate).filter(ScrapeCandidate.is_mock.is_(True)).delete(
+            synchronize_session=False
+        )
+        db.query(SourceMapping).filter(SourceMapping.is_mock.is_(True)).delete(
+            synchronize_session=False
+        )
+        db.query(AppSetting).filter(AppSetting.key == "demo_scrapers").delete(
+            synchronize_session=False
         )
         db.commit()
     if not scheduler.running:
@@ -256,6 +269,81 @@ def patch_media_file(media_id: int, payload: MediaFilePatch, db: Session = Depen
         setattr(media, key, value)
     db.commit()
     return {"id": media.id, "episode": media.episode, "parsed_title": media.parsed_title}
+
+
+def _resolve_media_stream_path(media: MediaFile) -> Path:
+    if media.status != "present":
+        raise AppError("MEDIA_UNAVAILABLE", "媒体文件当前不可用", status_code=404)
+    try:
+        library_root = Path(media.library_root.path).resolve(strict=True)
+        media_path = Path(media.path).resolve(strict=True)
+        media_path.relative_to(library_root)
+    except (OSError, ValueError):
+        raise AppError("MEDIA_UNAVAILABLE", "媒体文件不存在或不在媒体库内", status_code=404)
+    if not media_path.is_file():
+        raise AppError("MEDIA_UNAVAILABLE", "媒体文件不存在", status_code=404)
+    return media_path
+
+
+@app.get("/api/media-files/{media_id}/stream", response_class=FileResponse)
+def stream_media_file(media_id: int, db: Session = Depends(get_db)):
+    media = db.scalar(
+        select(MediaFile)
+        .options(selectinload(MediaFile.library_root))
+        .where(MediaFile.id == media_id)
+    )
+    if not media:
+        raise AppError("NOT_FOUND", "媒体文件不存在", status_code=404)
+    path = _resolve_media_stream_path(media)
+    media_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+    return FileResponse(
+        path,
+        media_type=media_type,
+        filename=path.name,
+        content_disposition_type="inline",
+    )
+
+
+@app.get("/api/sources/getchu/{source_id}/cover")
+async def getchu_cover(source_id: int, db: Session = Depends(get_db)):
+    proxy = next(
+        (
+            row.value
+            for row in [db.get(AppSetting, "proxy_url")]
+            if row and isinstance(row.value, str) and row.value
+        ),
+        None,
+    )
+    url = f"https://www.getchu.com/brandnew/{source_id}/c{source_id}package.jpg"
+    try:
+        async with httpx.AsyncClient(
+            proxy=proxy,
+            timeout=30,
+            follow_redirects=True,
+            headers={
+                "User-Agent": "AnimeManager/0.1 (local metadata client)",
+                "Referer": "https://www.getchu.com/",
+            },
+            cookies={"getchu_adalt_flag": "getchu.com"},
+        ) as client:
+            response = await client.get(url)
+            response.raise_for_status()
+    except httpx.HTTPError as exc:
+        raise AppError(
+            "GETCHU_COVER_FAILED",
+            "Getchu 封面获取失败",
+            details=type(exc).__name__,
+            retryable=True,
+            status_code=502,
+        ) from exc
+    mime = response.headers.get("content-type", "").split(";")[0]
+    if not mime.startswith("image/"):
+        raise AppError("INVALID_ARTWORK", "Getchu 封面响应不是图片", status_code=502)
+    return Response(
+        content=response.content,
+        media_type=mime,
+        headers={"Cache-Control": "public, max-age=3600"},
+    )
 
 
 def _group_query():
@@ -472,9 +560,10 @@ async def run_export(anime_id: int, payload: ExportRequest, db: Session = Depend
 DEFAULT_SETTINGS: dict[str, Any] = {
     "anidb_client": "",
     "anidb_clientver": 1,
+    "dmm_api_id": "",
+    "dmm_affiliate_id": "",
     "proxy_url": "",
     "request_interval_seconds": 2.1,
-    "demo_scrapers": settings.demo_scrapers,
     "scheduled_refresh": False,
 }
 
