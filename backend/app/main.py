@@ -183,7 +183,10 @@ def dashboard(db: Session = Depends(get_db)) -> dict[str, int]:
         "files": db.scalar(select(func.count(MediaFile.id))) or 0,
         "anime": db.scalar(select(func.count(Anime.id))) or 0,
         "pending": db.scalar(
-            select(func.count(MatchGroup.id)).where(MatchGroup.status == "pending")
+            select(func.count(MatchGroup.id)).where(
+                MatchGroup.status == "pending",
+                MatchGroup.files.any(),
+            )
         )
         or 0,
         "missing": db.scalar(
@@ -364,6 +367,9 @@ def list_groups(
     if status:
         query = query.where(MatchGroup.status == status)
         count_query = count_query.where(MatchGroup.status == status)
+    if status == "pending":
+        query = query.where(MatchGroup.files.any())
+        count_query = count_query.where(MatchGroup.files.any())
     total = db.scalar(count_query) or 0
     items = db.scalars(
         query.order_by(MatchGroup.updated_at.desc()).offset((page - 1) * page_size).limit(page_size)

@@ -20,7 +20,13 @@ const bySource = computed(() => groupCandidates(active.value?.candidates || [], 
 const playerUrl = computed(() => playerFile.value ? `/api/media-files/${playerFile.value.id}/stream` : '')
 
 async function loadGroups() {
-  groups.value = (await api.get('/match-groups', { params: { status: 'pending', page_size: 100 } })).data.items
+  const items: MatchGroup[] = (
+    await api.get('/match-groups', { params: { status: 'pending', page_size: 100 } })
+  ).data.items
+  groups.value = items.filter(group => group.files.length > 0)
+  if (active.value && !groups.value.some(group => group.id === active.value?.id)) {
+    active.value = null
+  }
   if (!active.value && groups.value.length) selectGroup(groups.value[0])
 }
 

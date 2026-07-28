@@ -28,6 +28,7 @@ engine = create_engine(
 def _sqlite_pragmas(dbapi_connection, _connection_record) -> None:
     if settings.database_url.startswith("sqlite"):
         cursor = dbapi_connection.cursor()
+        cursor.execute("PRAGMA busy_timeout=30000")
         cursor.execute("PRAGMA foreign_keys=ON")
         cursor.execute("PRAGMA journal_mode=WAL")
         cursor.close()
@@ -42,4 +43,3 @@ def get_db() -> Generator[Session, None, None]:
         yield db
     finally:
         db.close()
-
