@@ -63,10 +63,18 @@ a { color: inherit; text-decoration: none; }
 .existing-bind { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; margin-top: 22px; padding: 16px; border: 1px solid var(--line); background: #11171e; }
 .existing-bind > div:first-child { margin-right: auto; }
 .score { color: var(--cyan); font-variant-numeric: tabular-nums; }
-.anime-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(270px, 1fr)); gap: 16px; }
-.anime-card { min-height: 210px; padding: 20px; border: 1px solid var(--line); background: var(--surface); cursor: pointer; }
+.anime-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 16px; }
+.anime-card { min-height: 210px; display: grid; grid-template-columns: 132px minmax(0, 1fr); border: 1px solid var(--line); background: var(--surface); cursor: pointer; overflow: hidden; transition: border-color .2s, transform .2s; }
+.anime-card:hover { border-color: #4c756f; transform: translateY(-2px); }
+.anime-cover, .anime-detail-cover { display: grid; place-items: center; overflow: hidden; background: linear-gradient(145deg, #1e2c35, #0f151c); color: #536274; font-size: 9px; letter-spacing: .18em; }
+.anime-cover { min-height: 210px; border-right: 1px solid var(--line); }
+.anime-cover img, .anime-detail-cover img { width: 100%; height: 100%; object-fit: cover; }
+.anime-card-content { min-width: 0; padding: 20px; }
 .anime-card h3 { margin: 10px 0 6px; font-size: 17px; }
 .anime-meta { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 18px; }
+.anime-detail-head { display: grid; grid-template-columns: 140px minmax(0, 1fr); gap: 20px; margin-bottom: 18px; }
+.anime-detail-cover { width: 140px; aspect-ratio: 2 / 3; border: 1px solid var(--line); }
+.anime-detail-head p { margin: 0; line-height: 1.7; }
 .code-block { max-height: 360px; overflow: auto; white-space: pre-wrap; color: #b8c4d2; background: #0c1117; border: 1px solid #26303c; padding: 16px; font-family: "Cascadia Code", monospace; font-size: 11px; }
 .empty { padding: 54px 20px; text-align: center; color: var(--muted); }
 .setting-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 28px; }
@@ -91,4 +99,12 @@ a { color: inherit; text-decoration: none; }
   .page-wrap { padding: 22px 16px; }
   .stat-grid { grid-template-columns: repeat(2, 1fr); }
   .action-strip, .split, .setting-grid { grid-template-columns: 1fr; }
+  .anime-grid { grid-template-columns: 1fr; }
+}
+
+@media (max-width: 520px) {
+  .anime-card { grid-template-columns: 104px minmax(0, 1fr); }
+  .anime-cover { min-height: 180px; }
+  .anime-detail-head { grid-template-columns: 1fr; }
+  .anime-detail-cover { width: 120px; }
 }

@@ -14,6 +14,11 @@ const busy = ref(false)
 const renameOpen = ref(false)
 const renamePreview = ref<any>(null)
 const renameSeason = ref(1)
+const coverErrors = ref<Record<number, boolean>>({})
+
+function markCoverError(animeId: number) {
+  coverErrors.value[animeId] = true
+}
 
 async function load() {
   items.value = (await api.get('/anime', { params: { page_size: 100 } })).data.items
@@ -96,13 +101,26 @@ onMounted(load)
     <div class="panel-title"><div><p class="eyebrow">CATALOG</p><h2>已绑定作品</h2></div><span class="muted">{{ items.length }} 部</span></div>
     <div class="anime-grid">
       <article v-for="item in items" :key="item.id" class="anime-card" @click="show(item)">
-        <p class="eyebrow">{{ item.media_type || 'ANIME' }}</p>
-        <h3>{{ item.title }}</h3>
-        <span class="muted">{{ item.original_title || '暂无原始标题' }}</span>
-        <div class="anime-meta">
-          <el-tag v-if="item.year">{{ item.year }}</el-tag>
-          <el-tag type="info">{{ item.files.length }} 个文件</el-tag>
-          <el-tag v-for="mapping in item.mappings" :key="mapping.source" :type="mapping.is_mock ? 'warning' : 'success'">{{ mapping.source }}</el-tag>
+        <div class="anime-cover">
+          <img
+            v-if="item.cover_url && !coverErrors[item.id]"
+            :src="item.cover_url"
+            :alt="`${item.title} 封面`"
+            loading="lazy"
+            referrerpolicy="no-referrer"
+            @error="markCoverError(item.id)"
+          >
+          <span v-else>NO COVER</span>
+        </div>
+        <div class="anime-card-content">
+          <p class="eyebrow">{{ item.media_type || 'ANIME' }}</p>
+          <h3>{{ item.title }}</h3>
+          <span class="muted">{{ item.original_title || '暂无原始标题' }}</span>
+          <div class="anime-meta">
+            <el-tag v-if="item.year">{{ item.year }}</el-tag>
+            <el-tag type="info">{{ item.files.length }} 个文件</el-tag>
+            <el-tag v-for="mapping in item.mappings" :key="mapping.source" :type="mapping.is_mock ? 'warning' : 'success'">{{ mapping.source }}</el-tag>
+          </div>
         </div>
       </article>
       <div v-if="!items.length" class="empty">确认候选后，作品会显示在这里</div>
@@ -111,7 +129,19 @@ onMounted(load)
 
   <el-dialog v-model="detailOpen" width="min(820px, 94vw)" :title="selected?.title">
     <template v-if="selected">
-      <p class="muted">{{ selected.description || '暂无简介' }}</p>
+      <div class="anime-detail-head">
+        <div class="anime-detail-cover">
+          <img
+            v-if="selected.cover_url && !coverErrors[selected.id]"
+            :src="selected.cover_url"
+            :alt="`${selected.title} 封面`"
+            referrerpolicy="no-referrer"
+            @error="markCoverError(selected.id)"
+          >
+          <span v-else>NO COVER</span>
+        </div>
+        <p class="muted">{{ selected.description || '暂无简介' }}</p>
+      </div>
       <el-descriptions :column="2" border>
         <el-descriptions-item label="原始标题">{{ selected.original_title || '-' }}</el-descriptions-item>
         <el-descriptions-item label="年份">{{ selected.year || '-' }}</el-descriptions-item>
