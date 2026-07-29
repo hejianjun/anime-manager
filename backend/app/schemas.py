@@ -6,10 +6,12 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 
+# 所有数据库实体响应模型的共同基类，允许直接从 SQLAlchemy 对象读取字段。
 class ORMModel(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
+# 通用分页响应；具体资源列表可以复用相同的分页元数据结构。
 class Page(BaseModel):
     items: list[Any]
     total: int
@@ -17,6 +19,7 @@ class Page(BaseModel):
     page_size: int
 
 
+# 媒体库根目录的新增、局部更新和返回结构。
 class LibraryRootCreate(BaseModel):
     path: str
     enabled: bool = True
@@ -31,14 +34,17 @@ class LibraryRootOut(ORMModel):
     id: int
     path: str
     enabled: bool
+    # 尚未执行过扫描时为空。
     last_scan_at: datetime | None
     created_at: datetime
 
 
+# 扫描、批量匹配和批量输出等后台任务的统一状态。
 class TaskOut(ORMModel):
     id: int
     kind: str
     status: str
+    # 进度约定为 0 到 1；具体统计和失败详情分别放在 result、error 中。
     progress: float
     message: str
     result: dict[str, Any]
@@ -47,6 +53,7 @@ class TaskOut(ORMModel):
     updated_at: datetime
 
 
+# 已扫描媒体文件的展示结构，不暴露内部哈希等维护字段。
 class MediaFileOut(ORMModel):
     id: int
     path: str
@@ -61,17 +68,20 @@ class MediaFileOut(ORMModel):
     status: str
 
 
+# 当前仅允许人工修正集号和解析出的作品标题。
 class MediaFilePatch(BaseModel):
     episode: int | None = Field(default=None, ge=0, le=9999)
     parsed_title: str | None = Field(default=None, min_length=1, max_length=500)
 
 
+# 作品目录与 Jellyfin 输出文件的一致性检查结果。
 class CatalogHealthOut(BaseModel):
     directory_name_mismatch: bool
     missing_nfo_count: int
     missing_episode_image_count: int
 
 
+# 单个外部来源搜索候选；source_id 是后续刷新时使用的稳定来源标识。
 class CandidateOut(ORMModel):
     id: int
     source: str
@@ -85,6 +95,7 @@ class CandidateOut(ORMModel):
     is_mock: bool
 
 
+# 扫描生成的待匹配分组，包含组内文件和所有来源候选。
 class MatchGroupOut(ORMModel):
     id: int
     display_title: str
@@ -95,38 +106,46 @@ class MatchGroupOut(ORMModel):
     candidates: list[CandidateOut] = []
 
 
+# 允许人工修正匹配时使用的搜索词和界面展示标题。
 class MatchGroupPatch(BaseModel):
     search_keyword: str | None = Field(default=None, min_length=1, max_length=500)
     display_title: str | None = Field(default=None, min_length=1, max_length=500)
 
 
+# sources 为空时由接口使用当前设置中已启用的数据源。
 class SearchRequest(BaseModel):
     keyword: str | None = Field(default=None, min_length=1, max_length=500)
     sources: list[str] | None = None
 
 
+# 对全部待匹配分组执行搜索，并仅自动确认完全匹配的候选。
 class BulkSearchConfirmRequest(BaseModel):
     sources: list[str] | None = None
 
 
+# 每个来源对应一个候选 ID；值为 None 表示清除该来源的选择。
 class SelectionRequest(BaseModel):
     selections: dict[str, int | None]
 
 
+# 将待匹配分组直接绑定到已经存在的作品。
 class BindExistingRequest(BaseModel):
     anime_id: int
 
 
+# 重命名预览和执行共用的季号参数。
 class RenameRequest(BaseModel):
     season: int = Field(default=1, ge=0, le=99)
 
 
+# 已确认作品与外部元数据来源之间的持久映射。
 class MappingOut(ORMModel):
     source: str
     source_id: str
     is_mock: bool
 
 
+# 作品详情聚合响应，包含元数据、字段来源、外部映射和媒体文件。
 class AnimeOut(ORMModel):
     id: int
     title: str
@@ -142,6 +161,7 @@ class AnimeOut(ORMModel):
     tags: list[str]
     cast: list[dict[str, Any]]
     staff: list[dict[str, Any]]
+    # 记录每个作品字段来自人工编辑还是某个外部数据源。
     field_provenance: dict[str, str]
     catalog_health: CatalogHealthOut
     mappings: list[MappingOut] = []
@@ -149,6 +169,7 @@ class AnimeOut(ORMModel):
     updated_at: datetime
 
 
+# 作品元数据的人工局部更新；被修改字段会在业务层标记为 manual。
 class AnimePatch(BaseModel):
     title: str | None = None
     original_title: str | None = None
@@ -161,6 +182,7 @@ class AnimePatch(BaseModel):
     tags: list[str] | None = None
 
 
+# 可由前端修改的运行设置；未提供的字段保持原值。
 class SettingsPatch(BaseModel):
     enabled_scrapers: list[Literal["anidb", "dmm", "getchu"]] | None = None
     anidb_client: str | None = None
@@ -172,5 +194,6 @@ class SettingsPatch(BaseModel):
     scheduled_refresh: bool | None = None
 
 
+# overwrite 为真时允许覆盖已有输出，但业务层仍会先创建备份。
 class ExportRequest(BaseModel):
     overwrite: bool = False
