@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { api, getAllAnime, type Anime } from '../api'
+import { api, getAllAnime, type Anime, type MediaFile } from '../api'
 import { getEpisodeHealth, hasExportBlockers, matchesAnimeSearch, missingEpisodeText } from '../utils'
 
 const items = ref<Anime[]>([])
@@ -33,7 +33,10 @@ const bulkArtifactRunning = ref(false)
 const bulkArtifactProgress = ref(0)
 const bulkArtifactTaskText = ref('')
 const coverErrors = ref<Record<number, boolean>>({})
+const playerOpen = ref(false)
+const playerFile = ref<MediaFile | null>(null)
 let bulkRenameEvents: EventSource | null = null
+const playerUrl = computed(() => playerFile.value ? `/api/media-files/${playerFile.value.id}/stream` : '')
 
 const itemHealth = computed(() =>
   Object.fromEntries(items.value.map(item => [item.id, getEpisodeHealth(item)])),
@@ -97,6 +100,15 @@ function coverUrl(anime: Anime) {
 
 function applySearch() {
   searchKeyword.value = searchInput.value.trim()
+}
+
+function playMedia(file: MediaFile) {
+  playerFile.value = file
+  playerOpen.value = true
+}
+
+function closePlayer() {
+  playerFile.value = null
 }
 
 async function load() {
@@ -410,6 +422,11 @@ onBeforeUnmount(() => bulkRenameEvents?.close())
           <template #default="{ row }">{{ selected.episode_titles[String(row.episode)] || '-' }}</template>
         </el-table-column>
         <el-table-column prop="status" label="状态" width="90" />
+        <el-table-column label="操作" width="80" fixed="right">
+          <template #default="{ row }">
+            <el-button size="small" @click="playMedia(row)">播放</el-button>
+          </template>
+        </el-table-column>
       </el-table>
     </template>
     <template #footer>
@@ -417,6 +434,19 @@ onBeforeUnmount(() => bulkRenameEvents?.close())
       <el-button :loading="busy" @click="previewRename">批量重命名</el-button>
       <el-button type="primary" @click="showPreview">预览导出</el-button>
     </template>
+  </el-dialog>
+
+  <el-dialog
+    v-model="playerOpen"
+    width="min(1000px, 96vw)"
+    :title="playerFile?.relative_path || '播放视频'"
+    destroy-on-close
+    append-to-body
+    @closed="closePlayer"
+  >
+    <video v-if="playerFile" class="media-player" :src="playerUrl" controls autoplay preload="metadata">
+      当前浏览器不支持播放该视频格式。
+    </video>
   </el-dialog>
 
   <el-dialog v-model="renameOpen" width="min(980px, 96vw)" title="批量移动与重命名预览">
