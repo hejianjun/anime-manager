@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 import shutil
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
@@ -240,21 +241,23 @@ def build_rename_plan(anime: Anime, season: int = 1) -> dict:
     }
 
 
-def build_bulk_rename_plan(
-    animes: list[Anime],
-    season: int = 1,
-    progress_callback: Callable[[int, int, str], None] | None = None,
-) -> dict:
-    files: list[dict] = []
-    blockers: list[str] = []
-    skipped: list[dict] = []
-    targets: dict[Path, tuple[int, str]] = {}
-    cleanup_sources: set[Path] = set()
-    cleanup_targets: dict[Path, tuple[Path, int, str]] = {}
-    cleanup_dirs: list[dict] = []
-    included_anime_ids: set[int] = set()
-    root_availability: dict[str, bool] = {}
+@dataclass
+class _BulkRenamePlanState:
+    """批量计划的累计状态，集中保存跨作品去重和冲突检测所需的数据。"""
 
+    files: list[dict] = field(default_factory=list)
+    blockers: list[str] = field(default_factory=list)
+    skipped: list[dict] = field(default_factory=list)
+    targets: dict[Path, tuple[int, str]] = field(default_factory=dict)
+    cleanup_sources: set[Path] = field(default_factory=set)
+    cleanup_targets: dict[Path, tuple[Path, int, str]] = field(default_factory=dict)
+    cleanup_dirs: list[dict] = field(default_factory=list)
+    included_anime_ids: set[int] = field(default_factory=set)
+
+
+def _probe_library_roots(animes: list[Anime]) -> dict[str, bool]:
+    """每个媒体库只探测一次，避免 NAS 离线时为每部作品重复等待网络超时。"""
+    root_availability: dict[str, bool] = {}
     for anime in animes:
         for media in anime.files:
             if media.status != "present":
@@ -266,108 +269,154 @@ def build_bulk_rename_plan(
                 root_availability[root_path] = Path(root_path).is_dir()
             except OSError:
                 root_availability[root_path] = False
+    return root_availability
 
+
+def _bulk_rename_skip_reason(
+    anime: Anime,
+    root_availability: dict[str, bool],
+) -> str | None:
+    """返回无需生成计划的原因；None 表示该作品需要继续检查。"""
+    present = [item for item in anime.files if item.status == "present"]
+    if not present:
+        return "没有可用媒体文件"
+
+    unavailable_roots = {
+        item.library_root.path
+        for item in present
+        if not root_availability.get(item.library_root.path, False)
+    }
+    if unavailable_roots:
+        return f"媒体库不可访问: {'、'.join(sorted(unavailable_roots))}"
+    if not anime.catalog_health["directory_name_mismatch"]:
+        return "目录名已一致"
+    return None
+
+
+def _merge_bulk_files(
+    state: _BulkRenamePlanState,
+    anime: Anime,
+    plan: dict,
+) -> None:
+    """合并文件计划，同时检测不同作品是否生成了相同目标路径。"""
+    for item in plan["files"]:
+        target = Path(item["target"])
+        previous = state.targets.get(target)
+        if previous and previous[0] != anime.id:
+            state.blockers.append(
+                f"作品「{previous[1]}」与「{anime.title}」将写入同一目标: {target}"
+            )
+        else:
+            state.targets[target] = (anime.id, anime.title)
+        state.files.append(
+            {
+                **item,
+                "anime_id": anime.id,
+                "anime_title": anime.title,
+                "target_dir": plan["target_dir"],
+                "library_root": plan["library_root"],
+            }
+        )
+
+
+def _merge_bulk_cleanup_dirs(
+    state: _BulkRenamePlanState,
+    anime: Anime,
+    plan: dict,
+) -> None:
+    """合并旧目录归档计划，并避免重复归档或写入同一 .delete 目标。"""
+    for item in plan["cleanup_dirs"]:
+        source = Path(item["source"])
+        target = Path(item["target"])
+        if source in state.cleanup_sources:
+            continue
+
+        previous = state.cleanup_targets.get(target)
+        if previous and previous[0] != source:
+            state.blockers.append(
+                f"作品「{previous[2]}」与「{anime.title}」的旧目录将写入同一 .delete 目录: {target}"
+            )
+            continue
+
+        state.cleanup_sources.add(source)
+        state.cleanup_targets[target] = (source, anime.id, anime.title)
+        state.cleanup_dirs.append(
+            {
+                **item,
+                "anime_id": anime.id,
+                "anime_title": anime.title,
+                "library_root": plan["library_root"],
+            }
+        )
+
+
+def _merge_bulk_anime_plan(
+    state: _BulkRenamePlanState,
+    anime: Anime,
+    plan: dict,
+) -> None:
+    """把单作品计划并入全局计划，并补充作品上下文。"""
+    state.included_anime_ids.add(anime.id)
+    state.blockers.extend(f"{anime.title}: {item}" for item in plan["blockers"])
+    _merge_bulk_files(state, anime, plan)
+    _merge_bulk_cleanup_dirs(state, anime, plan)
+
+
+def build_bulk_rename_plan(
+    animes: list[Anime],
+    season: int = 1,
+    progress_callback: Callable[[int, int, str], None] | None = None,
+) -> dict:
+    """逐部生成并合并重命名计划；单部目录故障不会中止整个批次。"""
+    state = _BulkRenamePlanState()
+    root_availability = _probe_library_roots(animes)
     total = len(animes)
-    for index, anime in enumerate(animes, start=1):
-        if not any(item.status == "present" for item in anime.files):
-            skipped.append({"anime_id": anime.id, "title": anime.title, "reason": "没有可用媒体文件"})
-            if progress_callback:
-                progress_callback(index, total, anime.title)
-            continue
-        unavailable_roots = {
-            item.library_root.path
-            for item in anime.files
-            if item.status == "present"
-            and not root_availability.get(item.library_root.path, False)
-        }
-        if unavailable_roots:
-            roots = "、".join(sorted(unavailable_roots))
-            skipped.append(
-                {
-                    "anime_id": anime.id,
-                    "title": anime.title,
-                    "reason": f"媒体库不可访问: {roots}",
-                }
-            )
-            if progress_callback:
-                progress_callback(index, total, anime.title)
-            continue
-        if not anime.catalog_health["directory_name_mismatch"]:
-            skipped.append({"anime_id": anime.id, "title": anime.title, "reason": "目录名已一致"})
-            if progress_callback:
-                progress_callback(index, total, anime.title)
-            continue
-        try:
-            plan = build_rename_plan(anime, season)
-        except AppError as error:
-            blockers.append(f"{anime.title}: {error.message}")
-            if progress_callback:
-                progress_callback(index, total, anime.title)
-            continue
-        except OSError as error:
-            skipped.append(
-                {
-                    "anime_id": anime.id,
-                    "title": anime.title,
-                    "reason": f"目录不可访问: {error}",
-                }
-            )
-            if progress_callback:
-                progress_callback(index, total, anime.title)
-            continue
 
-        included_anime_ids.add(anime.id)
-        blockers.extend(f"{anime.title}: {item}" for item in plan["blockers"])
-        for item in plan["files"]:
-            target = Path(item["target"])
-            previous = targets.get(target)
-            if previous and previous[0] != anime.id:
-                blockers.append(f"作品「{previous[1]}」与「{anime.title}」将写入同一目标: {target}")
-            else:
-                targets[target] = (anime.id, anime.title)
-            files.append(
-                {
-                    **item,
-                    "anime_id": anime.id,
-                    "anime_title": anime.title,
-                    "target_dir": plan["target_dir"],
-                    "library_root": plan["library_root"],
-                }
-            )
-        for item in plan["cleanup_dirs"]:
-            source = Path(item["source"])
-            target = Path(item["target"])
-            if source in cleanup_sources:
-                continue
-            previous = cleanup_targets.get(target)
-            if previous and previous[0] != source:
-                blockers.append(
-                    f"作品「{previous[2]}」与「{anime.title}」的旧目录将写入同一 .delete 目录: {target}"
-                )
-            else:
-                cleanup_sources.add(source)
-                cleanup_targets[target] = (source, anime.id, anime.title)
-                cleanup_dirs.append(
+    for index, anime in enumerate(animes, start=1):
+        try:
+            skip_reason = _bulk_rename_skip_reason(anime, root_availability)
+            if skip_reason:
+                state.skipped.append(
                     {
-                        **item,
                         "anime_id": anime.id,
-                        "anime_title": anime.title,
-                        "library_root": plan["library_root"],
+                        "title": anime.title,
+                        "reason": skip_reason,
                     }
                 )
-        if progress_callback:
-            progress_callback(index, total, anime.title)
+                continue
+
+            try:
+                plan = build_rename_plan(anime, season)
+            except AppError as error:
+                state.blockers.append(f"{anime.title}: {error.message}")
+                continue
+            except OSError as error:
+                # 作品目录在根目录探测后仍可能离线，将故障隔离到当前作品。
+                state.skipped.append(
+                    {
+                        "anime_id": anime.id,
+                        "title": anime.title,
+                        "reason": f"目录不可访问: {error}",
+                    }
+                )
+                continue
+
+            _merge_bulk_anime_plan(state, anime, plan)
+        finally:
+            # 无论作品成功、跳过还是失败，都向 SSE 任务报告已完成检查。
+            if progress_callback:
+                progress_callback(index, total, anime.title)
 
     return {
         "season": season,
-        "anime_count": len(included_anime_ids),
-        "file_count": len(files),
-        "changed_count": sum(1 for item in files if item["changed"]),
-        "cleanup_count": sum(1 for item in cleanup_dirs if item["changed"]),
-        "blockers": blockers,
-        "skipped": skipped,
-        "files": files,
-        "cleanup_dirs": cleanup_dirs,
+        "anime_count": len(state.included_anime_ids),
+        "file_count": len(state.files),
+        "changed_count": sum(1 for item in state.files if item["changed"]),
+        "cleanup_count": sum(1 for item in state.cleanup_dirs if item["changed"]),
+        "blockers": state.blockers,
+        "skipped": state.skipped,
+        "files": state.files,
+        "cleanup_dirs": state.cleanup_dirs,
     }
 
 
