@@ -86,32 +86,40 @@ flowchart TD
 
 扫描开始时，同一媒体库的旧记录会先标记为 `missing`。因此文件在程序外被改名后，新路径会重新计算哈希，再通过相同的 `content_hash` 找回旧记录及其作品绑定；仅仅依靠哈希找回改名记录并不能省略这次计算。
 
-作品详情和“全部作品”的批量重命名走另一条路径：预览阶段不修改缓存；确认执行后移动文件，只更新 `media_file.path` 和 `relative_path`，保留原来的 `content_hash`、`hash_algorithm`、`size` 和 `modified_ns`。同一媒体库内的正常重命名不改变文件内容和修改时间，因此下次扫描可以直接命中原缓存；如果底层文件属性发生变化，下次扫描会自动重新计算。
+作品详情和“全部作品”的批量重命名走另一条路径：预览阶段不修改哈希缓存；确认执行后移动文件，只更新 `media_file.path` 和 `relative_path`，保留原来的 `content_hash`、`hash_algorithm`、`size` 和 `modified_ns`。同一媒体库内的正常重命名不改变文件内容和修改时间，因此下次扫描可以直接命中原缓存；如果底层文件属性发生变化，下次扫描会自动重新计算。
+
+“全部作品”预览和执行均使用后台任务并通过 SSE 报告进度，避免慢速 NAS 使普通 HTTP 请求超时。预览生成的精确重命名计划保存在对应 `task_record.result` 中，执行时复用该计划，不会再次扫描全部作品目录；移动前仍会统一复核源文件、目标路径、媒体库边界和数据库记录。预览后文件状态发生变化时，执行会在移动任何文件之前失败并要求重新预览。NAS 断开或个别作品目录不可访问时，该作品会作为跳过项保留原因，不会中止其他作品的预览。
 
 ```mermaid
 sequenceDiagram
     actor USER as 用户
     participant API as 批量重命名接口
+    participant TASK as 后台任务与 SSE
     participant FS as 文件系统
     participant DB as media_file
     participant SCAN as 扫描器
 
     USER->>API: 请求重命名预览
-    API->>DB: 读取 present 文件和现有路径
-    API-->>USER: 返回目标路径与冲突项
+    API-->>USER: 返回预览任务 ID
+    API->>TASK: 后台逐部生成计划
+    TASK->>DB: 读取 present 文件和现有路径
+    TASK->>FS: 检查目录、关联文件和目标冲突
+    TASK-->>USER: SSE 进度与完整预览计划
     Note over DB: 预览不修改哈希缓存
 
-    USER->>API: 确认执行
-    API->>FS: 移动视频及关联文件
-    API->>DB: 更新 path 和 relative_path
+    USER->>API: 携预览任务 ID 确认执行
+    API-->>USER: 返回执行任务 ID
+    API->>TASK: 复用缓存计划并重新校验
+    TASK->>FS: 移动视频及关联文件
+    TASK->>DB: 更新 path 和 relative_path
     Note over DB: content_hash、算法、大小和修改时间保持不变
     alt 全部移动和数据库提交成功
-        DB-->>API: 提交成功
-        API-->>USER: 返回新路径
+        DB-->>TASK: 提交成功
+        TASK-->>USER: SSE 完成事件与新路径
     else 移动或提交失败
-        API->>DB: 回滚事务
-        API->>FS: 按相反顺序移回文件
-        API-->>USER: 返回错误
+        TASK->>DB: 回滚事务
+        TASK->>FS: 按相反顺序移回文件
+        TASK-->>USER: SSE 失败事件
     end
 
     USER->>SCAN: 下次扫描

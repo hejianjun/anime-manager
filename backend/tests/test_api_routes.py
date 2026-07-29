@@ -48,3 +48,7 @@ def test_api_operation_contract_is_preserved() -> None:
     }
 
     assert actual == EXPECTED_OPERATIONS
+    assert schema["paths"]["/api/anime/rename-preview"]["post"]["responses"].keys() >= {
+        "202"
+    }
+    assert schema["paths"]["/api/anime/rename"]["post"]["responses"].keys() >= {"202"}

@@ -138,6 +138,10 @@ class RenameRequest(BaseModel):
     season: int = Field(default=1, ge=0, le=99)
 
 
+class BulkRenameExecuteRequest(BaseModel):
+    preview_task_id: int = Field(gt=0)
+
+
 # 已确认作品与外部元数据来源之间的持久映射。
 class MappingOut(ORMModel):
     source: str

@@ -1,13 +1,16 @@
 from pathlib import Path
 
+import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
 from app.database import Base
+from app.errors import AppError
 from app.media_ops import (
     bind_group_to_anime,
     build_bulk_rename_plan,
     build_rename_plan,
+    execute_cached_bulk_rename_plan,
     execute_bulk_rename_plan,
     execute_rename_plan,
 )
@@ -299,3 +302,118 @@ def test_bulk_rename_skips_anime_whose_directory_name_already_matches(
         assert plan["skipped"] == [
             {"anime_id": anime.id, "title": "作品名", "reason": "目录名已一致"}
         ]
+
+
+def test_bulk_rename_skips_anime_when_library_is_unavailable(tmp_path: Path) -> None:
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    missing_root = tmp_path / "disconnected"
+    with Session(engine) as db:
+        root = LibraryRoot(path=str(missing_root))
+        anime = Anime(title="离线作品")
+        db.add_all([root, anime])
+        db.flush()
+        media = MediaFile(
+            library_root_id=root.id,
+            anime_id=anime.id,
+            path=str(missing_root / "incoming" / "Episode 01.mkv"),
+            relative_path="incoming/Episode 01.mkv",
+            size=1,
+            modified_ns=1,
+            parsed_title="离线作品",
+            episode=1,
+            status="present",
+        )
+        db.add(media)
+        db.commit()
+        db.refresh(anime)
+
+        plan = build_bulk_rename_plan([anime], 1)
+
+        assert plan["anime_count"] == 0
+        assert plan["blockers"] == []
+        assert plan["skipped"] == [
+            {
+                "anime_id": anime.id,
+                "title": "离线作品",
+                "reason": f"媒体库不可访问: {missing_root}",
+            }
+        ]
+
+
+def test_cached_bulk_rename_revalidates_target_before_moving(tmp_path: Path) -> None:
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        root = LibraryRoot(path=str(tmp_path))
+        anime = Anime(title="作品名")
+        db.add_all([root, anime])
+        db.flush()
+        source = tmp_path / "incoming" / "Example E01.mkv"
+        source.parent.mkdir()
+        source.write_bytes(b"source")
+        media = add_media(db, root, source, 1)
+        media.anime_id = anime.id
+        db.commit()
+        db.refresh(anime)
+        plan = build_bulk_rename_plan([anime], 1)
+        target = Path(plan["files"][0]["target"])
+        target.parent.mkdir()
+        target.write_bytes(b"new conflict")
+
+        with pytest.raises(AppError) as caught:
+            execute_cached_bulk_rename_plan(db, plan)
+
+        assert caught.value.code == "RENAME_PLAN_STALE"
+        assert source.exists()
+        assert target.read_bytes() == b"new conflict"
+
+
+def test_cached_bulk_rename_rolls_back_partial_file_moves(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        root = LibraryRoot(path=str(tmp_path))
+        anime = Anime(title="作品名")
+        db.add_all([root, anime])
+        db.flush()
+        first = tmp_path / "incoming" / "Example E01.mkv"
+        second = tmp_path / "incoming" / "Example E02.mkv"
+        first.parent.mkdir()
+        first.write_bytes(b"first")
+        second.write_bytes(b"second")
+        first_media = add_media(db, root, first, 1)
+        second_media = add_media(db, root, second, 2)
+        first_media.anime_id = anime.id
+        second_media.anime_id = anime.id
+        db.commit()
+        db.refresh(anime)
+        plan = build_bulk_rename_plan([anime], 1)
+
+        from app import media_ops
+
+        original_move = media_ops.shutil.move
+        calls = 0
+
+        def fail_second_move(source: str, target: str):
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                raise OSError("simulated move failure")
+            return original_move(source, target)
+
+        monkeypatch.setattr(media_ops.shutil, "move", fail_second_move)
+
+        with pytest.raises(OSError, match="simulated move failure"):
+            execute_cached_bulk_rename_plan(db, plan)
+
+        assert first.exists()
+        assert second.exists()
+        assert not any(
+            Path(item["target"]).exists()
+            for item in plan["files"]
+            if item["changed"]
+        )

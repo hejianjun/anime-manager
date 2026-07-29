@@ -7,15 +7,22 @@ from ..database import SessionLocal, get_db
 from ..errors import AppError
 from ..exporter import build_export_plan, export_anime, public_export_plan
 from ..matching import refresh_anime
-from ..media_ops import (
-    build_bulk_rename_plan,
-    build_rename_plan,
-    execute_bulk_rename_plan,
-    execute_rename_plan,
-)
+from ..media_ops import build_rename_plan, execute_rename_plan
 from ..models import Anime, TaskRecord
 from ..queries import anime_query
-from ..schemas import AnimeOut, AnimePatch, ExportRequest, RenameRequest, TaskOut
+from ..schemas import (
+    AnimeOut,
+    AnimePatch,
+    BulkRenameExecuteRequest,
+    ExportRequest,
+    RenameRequest,
+    TaskOut,
+)
+from ..services.bulk_rename import (
+    claim_preview_for_execution,
+    run_bulk_rename_execute,
+    run_bulk_rename_preview,
+)
 from ..source_settings import enabled_scraper_names
 
 router = APIRouter(prefix="/api/anime", tags=["anime"])
@@ -107,22 +114,38 @@ def rename_files(
     return execute_rename_plan(db, anime, payload.season)
 
 
-@router.post("/rename-preview")
+@router.post("/rename-preview", response_model=TaskOut, status_code=202)
 def rename_all_preview(
     payload: RenameRequest,
+    background: BackgroundTasks,
     db: Session = Depends(get_db),
 ):
-    animes = db.scalars(anime_query().order_by(Anime.title)).unique().all()
-    return build_bulk_rename_plan(list(animes), payload.season)
+    task = TaskRecord(
+        kind="bulk_rename_preview",
+        message="等待生成重命名预览",
+        result={"season": payload.season},
+    )
+    db.add(task)
+    db.commit()
+    db.refresh(task)
+    background.add_task(run_bulk_rename_preview, task.id, payload.season)
+    return task
 
 
-@router.post("/rename")
+@router.post("/rename", response_model=TaskOut, status_code=202)
 def rename_all_files(
-    payload: RenameRequest,
+    payload: BulkRenameExecuteRequest,
+    background: BackgroundTasks,
     db: Session = Depends(get_db),
 ):
-    animes = db.scalars(anime_query().order_by(Anime.title)).unique().all()
-    return execute_bulk_rename_plan(db, list(animes), payload.season)
+    task = TaskRecord(
+        kind="bulk_rename_execute",
+        message="等待执行重命名",
+        result={"preview_task_id": payload.preview_task_id},
+    )
+    task = claim_preview_for_execution(db, payload.preview_task_id, task)
+    background.add_task(run_bulk_rename_execute, task.id, payload.preview_task_id)
+    return task
 
 
 @router.post("/artifacts-preview")

@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 import shutil
 from pathlib import Path
+from typing import Callable
 
 from sqlalchemy.orm import Session
 
@@ -230,6 +231,7 @@ def build_rename_plan(anime: Anime, season: int = 1) -> dict:
     return {
         "anime_id": anime.id,
         "season": season,
+        "library_root": str(library_root),
         "target_dir": str(target_dir),
         "deletion_dir": str(library_root / DELETION_DIRECTORY_NAME),
         "blockers": blockers,
@@ -238,7 +240,11 @@ def build_rename_plan(anime: Anime, season: int = 1) -> dict:
     }
 
 
-def build_bulk_rename_plan(animes: list[Anime], season: int = 1) -> dict:
+def build_bulk_rename_plan(
+    animes: list[Anime],
+    season: int = 1,
+    progress_callback: Callable[[int, int, str], None] | None = None,
+) -> dict:
     files: list[dict] = []
     blockers: list[str] = []
     skipped: list[dict] = []
@@ -247,18 +253,67 @@ def build_bulk_rename_plan(animes: list[Anime], season: int = 1) -> dict:
     cleanup_targets: dict[Path, tuple[Path, int, str]] = {}
     cleanup_dirs: list[dict] = []
     included_anime_ids: set[int] = set()
+    root_availability: dict[str, bool] = {}
 
     for anime in animes:
+        for media in anime.files:
+            if media.status != "present":
+                continue
+            root_path = media.library_root.path
+            if root_path in root_availability:
+                continue
+            try:
+                root_availability[root_path] = Path(root_path).is_dir()
+            except OSError:
+                root_availability[root_path] = False
+
+    total = len(animes)
+    for index, anime in enumerate(animes, start=1):
         if not any(item.status == "present" for item in anime.files):
             skipped.append({"anime_id": anime.id, "title": anime.title, "reason": "没有可用媒体文件"})
+            if progress_callback:
+                progress_callback(index, total, anime.title)
+            continue
+        unavailable_roots = {
+            item.library_root.path
+            for item in anime.files
+            if item.status == "present"
+            and not root_availability.get(item.library_root.path, False)
+        }
+        if unavailable_roots:
+            roots = "、".join(sorted(unavailable_roots))
+            skipped.append(
+                {
+                    "anime_id": anime.id,
+                    "title": anime.title,
+                    "reason": f"媒体库不可访问: {roots}",
+                }
+            )
+            if progress_callback:
+                progress_callback(index, total, anime.title)
             continue
         if not anime.catalog_health["directory_name_mismatch"]:
             skipped.append({"anime_id": anime.id, "title": anime.title, "reason": "目录名已一致"})
+            if progress_callback:
+                progress_callback(index, total, anime.title)
             continue
         try:
             plan = build_rename_plan(anime, season)
         except AppError as error:
             blockers.append(f"{anime.title}: {error.message}")
+            if progress_callback:
+                progress_callback(index, total, anime.title)
+            continue
+        except OSError as error:
+            skipped.append(
+                {
+                    "anime_id": anime.id,
+                    "title": anime.title,
+                    "reason": f"目录不可访问: {error}",
+                }
+            )
+            if progress_callback:
+                progress_callback(index, total, anime.title)
             continue
 
         included_anime_ids.add(anime.id)
@@ -276,6 +331,7 @@ def build_bulk_rename_plan(animes: list[Anime], season: int = 1) -> dict:
                     "anime_id": anime.id,
                     "anime_title": anime.title,
                     "target_dir": plan["target_dir"],
+                    "library_root": plan["library_root"],
                 }
             )
         for item in plan["cleanup_dirs"]:
@@ -296,8 +352,11 @@ def build_bulk_rename_plan(animes: list[Anime], season: int = 1) -> dict:
                         **item,
                         "anime_id": anime.id,
                         "anime_title": anime.title,
+                        "library_root": plan["library_root"],
                     }
                 )
+        if progress_callback:
+            progress_callback(index, total, anime.title)
 
     return {
         "season": season,
@@ -312,8 +371,13 @@ def build_bulk_rename_plan(animes: list[Anime], season: int = 1) -> dict:
     }
 
 
-def _execute_plan_files(db: Session, plan: dict) -> list[tuple[Path, Path]]:
-    moved: list[tuple[Path, Path]] = []
+def _execute_plan_files(
+    db: Session,
+    plan: dict,
+    moved: list[tuple[Path, Path]] | None = None,
+    progress_callback: Callable[[str], None] | None = None,
+) -> list[tuple[Path, Path]]:
+    moved = moved if moved is not None else []
     target_dirs = {Path(item["target"]).parent for item in plan["files"] if item["changed"]}
     for target_dir in target_dirs:
         target_dir.mkdir(parents=True, exist_ok=True)
@@ -329,6 +393,8 @@ def _execute_plan_files(db: Session, plan: dict) -> list[tuple[Path, Path]]:
         if media:
             media.path = str(target)
             media.relative_path = str(target.relative_to(Path(media.library_root.path).resolve()))
+        if progress_callback:
+            progress_callback(str(target))
     return moved
 
 
@@ -339,8 +405,12 @@ def _rollback_moves(moved: list[tuple[Path, Path]]) -> None:
             shutil.move(str(target), str(source))
 
 
-def _execute_plan_directories(plan: dict) -> list[tuple[Path, Path]]:
-    archived: list[tuple[Path, Path]] = []
+def _execute_plan_directories(
+    plan: dict,
+    archived: list[tuple[Path, Path]] | None = None,
+    progress_callback: Callable[[str], None] | None = None,
+) -> list[tuple[Path, Path]]:
+    archived = archived if archived is not None else []
     for item in plan["cleanup_dirs"]:
         if not item["changed"]:
             continue
@@ -349,6 +419,8 @@ def _execute_plan_directories(plan: dict) -> list[tuple[Path, Path]]:
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.move(str(source), str(target))
         archived.append((source, target))
+        if progress_callback:
+            progress_callback(str(target))
     return archived
 
 
@@ -360,8 +432,8 @@ def execute_rename_plan(db: Session, anime: Anime, season: int = 1) -> dict:
     moved: list[tuple[Path, Path]] = []
     archived: list[tuple[Path, Path]] = []
     try:
-        moved = _execute_plan_files(db, plan)
-        archived = _execute_plan_directories(plan)
+        _execute_plan_files(db, plan, moved)
+        _execute_plan_directories(plan, archived)
         db.commit()
         return {
             "moved": [str(target) for _, target in moved],
@@ -374,8 +446,7 @@ def execute_rename_plan(db: Session, anime: Anime, season: int = 1) -> dict:
         raise
 
 
-def execute_bulk_rename_plan(db: Session, animes: list[Anime], season: int = 1) -> dict:
-    plan = build_bulk_rename_plan(animes, season)
+def validate_bulk_rename_plan(db: Session, plan: dict) -> None:
     if plan["blockers"]:
         raise AppError(
             "RENAME_BLOCKED",
@@ -384,11 +455,81 @@ def execute_bulk_rename_plan(db: Session, animes: list[Anime], season: int = 1) 
             status_code=409,
         )
 
+    errors: list[str] = []
+    for item in plan["files"]:
+        if not item["changed"]:
+            continue
+        root = Path(item["library_root"]).absolute()
+        source = Path(item["source"]).absolute()
+        target = Path(item["target"]).absolute()
+        if not source.is_relative_to(root) or not target.is_relative_to(root):
+            errors.append(f"路径越过媒体库边界: {source} -> {target}")
+            continue
+        try:
+            if not source.is_file():
+                errors.append(f"源文件不存在或不可访问: {source}")
+            if target != source and target.exists():
+                errors.append(f"目标文件已存在: {target}")
+        except OSError as error:
+            errors.append(f"文件状态检查失败: {source}: {error}")
+        media_id = item.get("media_id")
+        if media_id is not None:
+            media = db.get(MediaFile, media_id)
+            if not media or media.status != "present" or Path(media.path).absolute() != source:
+                errors.append(f"媒体记录已变化，请重新预览: {source}")
+
+    for item in plan["cleanup_dirs"]:
+        if not item["changed"]:
+            continue
+        root = Path(item["library_root"]).absolute()
+        source = Path(item["source"]).absolute()
+        target = Path(item["target"]).absolute()
+        deletion_root = (root / DELETION_DIRECTORY_NAME).absolute()
+        if (
+            not source.is_relative_to(root)
+            or not target.is_relative_to(deletion_root)
+        ):
+            errors.append(f"归档路径越过媒体库边界: {source} -> {target}")
+            continue
+        try:
+            if not source.is_dir():
+                errors.append(f"待归档目录不存在或不可访问: {source}")
+            if target != source and target.exists():
+                errors.append(f".delete 目录中已存在同名文件夹: {target}")
+        except OSError as error:
+            errors.append(f"目录状态检查失败: {source}: {error}")
+
+    if errors:
+        raise AppError(
+            "RENAME_PLAN_STALE",
+            "文件状态已变化，请重新生成重命名预览",
+            details=errors,
+            status_code=409,
+        )
+
+
+def execute_cached_bulk_rename_plan(
+    db: Session,
+    plan: dict,
+    progress_callback: Callable[[int, int, str], None] | None = None,
+) -> dict:
+    validate_bulk_rename_plan(db, plan)
     moved: list[tuple[Path, Path]] = []
     archived: list[tuple[Path, Path]] = []
+    total = sum(1 for item in plan["files"] if item["changed"]) + sum(
+        1 for item in plan["cleanup_dirs"] if item["changed"]
+    )
+    completed = 0
+
+    def report(path: str) -> None:
+        nonlocal completed
+        completed += 1
+        if progress_callback:
+            progress_callback(completed, total, path)
+
     try:
-        moved = _execute_plan_files(db, plan)
-        archived = _execute_plan_directories(plan)
+        _execute_plan_files(db, plan, moved, report)
+        _execute_plan_directories(plan, archived, report)
         db.commit()
         return {
             "anime_count": plan["anime_count"],
@@ -401,3 +542,8 @@ def execute_bulk_rename_plan(db: Session, animes: list[Anime], season: int = 1) 
         _rollback_moves(archived)
         _rollback_moves(moved)
         raise
+
+
+def execute_bulk_rename_plan(db: Session, animes: list[Anime], season: int = 1) -> dict:
+    plan = build_bulk_rename_plan(animes, season)
+    return execute_cached_bulk_rename_plan(db, plan)

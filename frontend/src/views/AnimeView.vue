@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { api, type Anime } from '../api'
 import { getEpisodeHealth, hasExportBlockers, missingEpisodeText } from '../utils'
@@ -20,12 +20,18 @@ const renameSeason = ref(1)
 const bulkRenameOpen = ref(false)
 const bulkRenamePreview = ref<any>(null)
 const bulkRenameSeason = ref(1)
+const bulkRenamePreviewTaskId = ref<number | null>(null)
+const bulkRenameRunning = ref(false)
+const bulkRenameExecuting = ref(false)
+const bulkRenameProgress = ref(0)
+const bulkRenameTaskText = ref('')
 const bulkArtifactOpen = ref(false)
 const bulkArtifactPreview = ref<any>(null)
 const bulkArtifactRunning = ref(false)
 const bulkArtifactProgress = ref(0)
 const bulkArtifactTaskText = ref('')
 const coverErrors = ref<Record<number, boolean>>({})
+let bulkRenameEvents: EventSource | null = null
 
 const itemHealth = computed(() =>
   Object.fromEntries(items.value.map(item => [item.id, getEpisodeHealth(item)])),
@@ -159,17 +165,56 @@ async function renameFiles() {
 }
 
 async function previewBulkRename() {
-  busy.value = true
+  bulkRenameRunning.value = true
+  bulkRenamePreviewTaskId.value = null
+  bulkRenameProgress.value = 0
+  bulkRenameTaskText.value = '正在启动重命名预览'
   try {
-    bulkRenamePreview.value = (await api.post('/anime/rename-preview', { season: bulkRenameSeason.value })).data
+    const task = (await api.post('/anime/rename-preview', { season: bulkRenameSeason.value })).data
+    const completed = await waitForRenameTask(task.id, '重命名预览失败')
+    bulkRenamePreview.value = completed.result
+    bulkRenamePreviewTaskId.value = task.id
     bulkRenameOpen.value = true
   } catch (error) { ElMessage.error((error as Error).message) }
-  finally { busy.value = false }
+  finally { bulkRenameRunning.value = false }
+}
+
+function waitForRenameTask(taskId: number, failureMessage: string): Promise<any> {
+  bulkRenameEvents?.close()
+  return new Promise((resolve, reject) => {
+    const events = new EventSource(`/api/tasks/${taskId}/events`)
+    bulkRenameEvents = events
+    events.onmessage = (event) => {
+      try {
+        const current = JSON.parse(event.data)
+        bulkRenameProgress.value = Math.round(current.progress * 100)
+        bulkRenameTaskText.value = current.message
+        if (current.status === 'completed') {
+          events.close()
+          bulkRenameEvents = null
+          resolve(current)
+        } else if (current.status === 'failed') {
+          events.close()
+          bulkRenameEvents = null
+          reject(new Error(current.error?.message || failureMessage))
+        }
+      } catch (error) {
+        events.close()
+        bulkRenameEvents = null
+        reject(error)
+      }
+    }
+    events.onerror = () => {
+      bulkRenameTaskText.value = '实时进度连接中断，正在自动重连'
+    }
+  })
 }
 
 async function renameAllFiles() {
   if (
-    bulkRenamePreview.value?.blockers?.length
+    !bulkRenamePreviewTaskId.value
+    || bulkRenameRunning.value
+    || bulkRenamePreview.value?.blockers?.length
     || (!bulkRenamePreview.value?.changed_count && !bulkRenamePreview.value?.cleanup_count)
   ) return
   await ElMessageBox.confirm(
@@ -177,14 +222,21 @@ async function renameAllFiles() {
     '全部作品批量重命名确认',
     { type: 'warning' },
   )
-  busy.value = true
+  bulkRenameExecuting.value = true
+  bulkRenameProgress.value = 0
+  bulkRenameTaskText.value = '正在启动批量重命名'
   try {
-    const result = (await api.post('/anime/rename', { season: bulkRenameSeason.value })).data
+    const task = (await api.post('/anime/rename', {
+      preview_task_id: bulkRenamePreviewTaskId.value,
+    })).data
+    bulkRenamePreviewTaskId.value = null
+    const completed = await waitForRenameTask(task.id, '全部作品重命名失败')
+    const result = completed.result
     ElMessage.success(`已处理 ${result.anime_count} 部作品、${result.moved.length} 个文件，归档 ${result.archived_dirs.length} 个旧文件夹`)
     bulkRenameOpen.value = false
     await load()
   } catch (error) { ElMessage.error((error as Error).message) }
-  finally { busy.value = false }
+  finally { bulkRenameExecuting.value = false }
 }
 
 async function previewBulkArtifacts() {
@@ -235,6 +287,7 @@ async function writeBulkArtifacts() {
 }
 
 onMounted(load)
+onBeforeUnmount(() => bulkRenameEvents?.close())
 </script>
 
 <template>
@@ -244,8 +297,12 @@ onMounted(load)
       <div class="panel-actions">
         <span class="muted">{{ filteredItems.length }} / {{ items.length }} 部</span>
         <el-button :loading="busy" @click="previewBulkArtifacts">批量写入 NFO/剧集图片</el-button>
-        <el-button :loading="busy" @click="previewBulkRename">全部批量重命名（仅目录不一致）</el-button>
+        <el-button :loading="bulkRenameRunning" @click="previewBulkRename">全部批量重命名（仅目录不一致）</el-button>
       </div>
+    </div>
+    <div v-if="bulkRenameRunning" class="bulk-match-progress">
+      <el-progress :percentage="bulkRenameProgress" />
+      <span class="muted">{{ bulkRenameTaskText }}</span>
     </div>
     <div class="catalog-filter">
       <span class="muted">仅显示</span>
@@ -380,6 +437,13 @@ onMounted(load)
   </el-dialog>
 
   <el-dialog v-model="bulkRenameOpen" width="min(1100px, 96vw)" title="目录名不一致作品批量重命名预览">
+    <div v-if="bulkRenameExecuting || bulkRenameTaskText" class="bulk-match-progress">
+      <el-progress
+        :percentage="bulkRenameProgress"
+        :status="bulkRenameExecuting ? undefined : 'success'"
+      />
+      <span class="muted">{{ bulkRenameTaskText }}</span>
+    </div>
     <div class="toolbar">
       <span>季度</span>
       <el-input-number v-model="bulkRenameSeason" :min="0" :max="99" @change="previewBulkRename" />
@@ -424,8 +488,8 @@ onMounted(load)
       <el-button @click="bulkRenameOpen = false">取消</el-button>
       <el-button
         type="primary"
-        :disabled="Boolean(bulkRenamePreview?.blockers?.length) || (!bulkRenamePreview?.changed_count && !bulkRenamePreview?.cleanup_count)"
-        :loading="busy"
+        :disabled="bulkRenameRunning || !bulkRenamePreviewTaskId || Boolean(bulkRenamePreview?.blockers?.length) || (!bulkRenamePreview?.changed_count && !bulkRenamePreview?.cleanup_count)"
+        :loading="bulkRenameExecuting"
         @click="renameAllFiles"
       >
         确认全部移动并重命名
