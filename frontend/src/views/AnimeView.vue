@@ -80,6 +80,7 @@ const artifactKindLabels: Record<string, string> = {
   tvshow_nfo: '作品 NFO',
   episode_nfo: '剧集 NFO',
   movie_nfo: '电影 NFO',
+  poster: '作品主图',
   episode_image: '剧集图片',
 }
 
@@ -263,7 +264,7 @@ async function writeBulkArtifacts() {
     || !bulkArtifactPreview.value?.files?.length
   ) return
   await ElMessageBox.confirm(
-    `将补写 ${bulkArtifactPreview.value.nfo_count} 个 NFO，并生成 ${bulkArtifactPreview.value.episode_image_count} 张剧集图片；已有文件不会覆盖。确认继续？`,
+    `将补写 ${bulkArtifactPreview.value.nfo_count} 个 NFO、${bulkArtifactPreview.value.poster_count} 张作品主图，并生成 ${bulkArtifactPreview.value.episode_image_count} 张剧集图片；已有文件不会覆盖。确认继续？`,
     '批量写入确认',
     { type: 'warning' },
   )
@@ -303,7 +304,7 @@ onBeforeUnmount(() => bulkRenameEvents?.close())
       <div><p class="eyebrow">CATALOG</p><h2>已绑定作品</h2></div>
       <div class="panel-actions">
         <span class="muted">{{ filteredItems.length }} / {{ items.length }} 部</span>
-        <el-button :loading="busy" @click="previewBulkArtifacts">批量写入 NFO/剧集图片</el-button>
+        <el-button :loading="busy" @click="previewBulkArtifacts">批量写入 NFO/主图/剧集图片</el-button>
         <el-button :loading="bulkRenameRunning" @click="previewBulkRename">全部批量重命名（仅目录不一致）</el-button>
       </div>
     </div>
@@ -514,11 +515,12 @@ onBeforeUnmount(() => bulkRenameEvents?.close())
     </template>
   </el-dialog>
 
-  <el-dialog v-model="bulkArtifactOpen" width="min(1050px, 96vw)" title="批量写入 NFO 和剧集图片预览">
+  <el-dialog v-model="bulkArtifactOpen" width="min(1050px, 96vw)" title="批量写入 NFO、主图和剧集图片预览">
     <div class="toolbar">
       <span class="muted">
         {{ bulkArtifactPreview?.anime_count || 0 }} 部作品 ·
         {{ bulkArtifactPreview?.nfo_count || 0 }} 个 NFO ·
+        {{ bulkArtifactPreview?.poster_count || 0 }} 张作品主图 ·
         {{ bulkArtifactPreview?.episode_image_count || 0 }} 张剧集图片 ·
         {{ bulkArtifactPreview?.skipped?.length || 0 }} 个跳过项
       </span>
@@ -535,7 +537,7 @@ onBeforeUnmount(() => bulkRenameEvents?.close())
       v-else-if="!bulkArtifactPreview?.files?.length"
       type="success"
       :closable="false"
-      title="NFO 和剧集图片均已齐全，无需写入"
+      title="NFO、主图和剧集图片均已齐全，无需写入"
     />
     <div v-if="bulkArtifactRunning || bulkArtifactTaskText" class="bulk-match-progress">
       <el-progress

@@ -5,7 +5,9 @@ import shutil
 import subprocess
 import tempfile
 from pathlib import Path
+from urllib.parse import urlparse
 
+import httpx
 from sqlalchemy.orm import Session
 
 from .errors import AppError
@@ -49,6 +51,25 @@ def build_bulk_artifact_plan(animes: list[Anime]) -> dict:
                 "reason": "作品目录越过媒体库边界",
             })
             continue
+
+        poster = common_dir / "poster.jpg"
+        if not poster.exists():
+            if anime.cover_url:
+                entries.append({
+                    "anime_id": anime.id,
+                    "anime_title": anime.title,
+                    "media_id": None,
+                    "kind": "poster",
+                    "path": str(poster),
+                    "source": anime.cover_url,
+                })
+                anime_ids.add(anime.id)
+            else:
+                skipped.append({
+                    "anime_id": anime.id,
+                    "title": anime.title,
+                    "reason": "缺少主图地址，无法写入 poster.jpg",
+                })
 
         is_movie = len(present) == 1 and (anime.media_type or "").casefold() == "movie"
         if is_movie:
@@ -112,6 +133,7 @@ def build_bulk_artifact_plan(animes: list[Anime]) -> dict:
     return {
         "anime_count": len(anime_ids),
         "nfo_count": sum(item["kind"].endswith("_nfo") for item in entries),
+        "poster_count": sum(item["kind"] == "poster" for item in entries),
         "episode_image_count": image_count,
         "blockers": blockers,
         "skipped": skipped,
@@ -163,6 +185,34 @@ def _extract_episode_image(source: Path, target: Path, seek_seconds: float) -> N
             os.unlink(temp_name)
 
 
+def _download_poster(source: str, target: Path) -> None:
+    hostname = (urlparse(source).hostname or "").lower()
+    getchu = hostname == "www.getchu.com" or hostname.endswith(".getchu.com")
+    with httpx.Client(
+        timeout=45,
+        follow_redirects=True,
+        headers=(
+            {
+                "User-Agent": "AnimeManager/0.1 (local metadata client)",
+                "Referer": "https://www.getchu.com/",
+            }
+            if getchu
+            else None
+        ),
+        cookies={"getchu_adalt_flag": "getchu.com"} if getchu else None,
+    ) as client:
+        response = client.get(source)
+        response.raise_for_status()
+    mime = response.headers.get("content-type", "").split(";")[0]
+    if not mime.startswith("image/"):
+        raise AppError(
+            "INVALID_ARTWORK",
+            "主图响应不是图片",
+            details={"mime": mime, "source": source},
+        )
+    _atomic_write(target, response.content, overwrite=False)
+
+
 def execute_bulk_artifact_plan(
     db: Session,
     animes: list[Anime],
@@ -179,7 +229,7 @@ def execute_bulk_artifact_plan(
             )
         entries = plan["_entries"]
         task.status = "running"
-        task.message = "正在写入 NFO 和剧集图片"
+        task.message = "正在写入 NFO、主图和剧集图片"
         db.commit()
 
         written: list[str] = []
@@ -192,6 +242,9 @@ def execute_bulk_artifact_plan(
             try:
                 if target.exists():
                     existing.append(str(target))
+                elif entry["kind"] == "poster":
+                    _download_poster(entry["source"], target)
+                    written.append(str(target))
                 elif entry["kind"] == "episode_image":
                     _extract_episode_image(
                         Path(entry["source"]),
