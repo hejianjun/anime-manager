@@ -446,7 +446,65 @@ def execute_rename_plan(db: Session, anime: Anime, season: int = 1) -> dict:
         raise
 
 
+def _validate_planned_file(db: Session, item: dict) -> list[str]:
+    """复核预览中的单个文件，避免使用过期计划移动错误的路径。"""
+    errors: list[str] = []
+    root = Path(item["library_root"]).absolute()
+    source = Path(item["source"]).absolute()
+    target = Path(item["target"]).absolute()
+
+    # 缓存计划中的源路径和目标路径都必须仍在原媒体库内。
+    if not source.is_relative_to(root) or not target.is_relative_to(root):
+        return [f"路径越过媒体库边界: {source} -> {target}"]
+
+    try:
+        if not source.is_file():
+            errors.append(f"源文件不存在或不可访问: {source}")
+        if target != source and target.exists():
+            errors.append(f"目标文件已存在: {target}")
+    except OSError as error:
+        errors.append(f"文件状态检查失败: {source}: {error}")
+
+    # 视频文件还需确认数据库记录没有在预览后被扫描或人工操作改变。
+    media_id = item.get("media_id")
+    if media_id is not None:
+        media = db.get(MediaFile, media_id)
+        if (
+            not media
+            or media.status != "present"
+            or Path(media.path).absolute() != source
+        ):
+            errors.append(f"媒体记录已变化，请重新预览: {source}")
+    return errors
+
+
+def _validate_cleanup_directory(item: dict) -> list[str]:
+    """复核旧目录归档操作，并将目标严格限制在媒体库的 .delete 下。"""
+    root = Path(item["library_root"]).absolute()
+    source = Path(item["source"]).absolute()
+    target = Path(item["target"]).absolute()
+    deletion_root = (root / DELETION_DIRECTORY_NAME).absolute()
+
+    if (
+        not source.is_relative_to(root)
+        or not target.is_relative_to(deletion_root)
+    ):
+        return [f"归档路径越过媒体库边界: {source} -> {target}"]
+
+    errors: list[str] = []
+    try:
+        if not source.is_dir():
+            errors.append(f"待归档目录不存在或不可访问: {source}")
+        if target != source and target.exists():
+            errors.append(f".delete 目录中已存在同名文件夹: {target}")
+    except OSError as error:
+        errors.append(f"目录状态检查失败: {source}: {error}")
+    return errors
+
+
 def validate_bulk_rename_plan(db: Session, plan: dict) -> None:
+    """执行缓存计划前做一次只读复核，所有校验通过后才允许移动文件。"""
+    # 预览阶段发现的命名冲突属于计划本身的问题，不能通过重新校验消除。
     if plan["blockers"]:
         raise AppError(
             "RENAME_BLOCKED",
@@ -455,49 +513,14 @@ def validate_bulk_rename_plan(db: Session, plan: dict) -> None:
             status_code=409,
         )
 
+    # 先收集全部变化，确保不会移动一部分后才发现后续路径已经失效。
     errors: list[str] = []
     for item in plan["files"]:
-        if not item["changed"]:
-            continue
-        root = Path(item["library_root"]).absolute()
-        source = Path(item["source"]).absolute()
-        target = Path(item["target"]).absolute()
-        if not source.is_relative_to(root) or not target.is_relative_to(root):
-            errors.append(f"路径越过媒体库边界: {source} -> {target}")
-            continue
-        try:
-            if not source.is_file():
-                errors.append(f"源文件不存在或不可访问: {source}")
-            if target != source and target.exists():
-                errors.append(f"目标文件已存在: {target}")
-        except OSError as error:
-            errors.append(f"文件状态检查失败: {source}: {error}")
-        media_id = item.get("media_id")
-        if media_id is not None:
-            media = db.get(MediaFile, media_id)
-            if not media or media.status != "present" or Path(media.path).absolute() != source:
-                errors.append(f"媒体记录已变化，请重新预览: {source}")
-
+        if item["changed"]:
+            errors.extend(_validate_planned_file(db, item))
     for item in plan["cleanup_dirs"]:
-        if not item["changed"]:
-            continue
-        root = Path(item["library_root"]).absolute()
-        source = Path(item["source"]).absolute()
-        target = Path(item["target"]).absolute()
-        deletion_root = (root / DELETION_DIRECTORY_NAME).absolute()
-        if (
-            not source.is_relative_to(root)
-            or not target.is_relative_to(deletion_root)
-        ):
-            errors.append(f"归档路径越过媒体库边界: {source} -> {target}")
-            continue
-        try:
-            if not source.is_dir():
-                errors.append(f"待归档目录不存在或不可访问: {source}")
-            if target != source and target.exists():
-                errors.append(f".delete 目录中已存在同名文件夹: {target}")
-        except OSError as error:
-            errors.append(f"目录状态检查失败: {source}: {error}")
+        if item["changed"]:
+            errors.extend(_validate_cleanup_directory(item))
 
     if errors:
         raise AppError(
