@@ -51,6 +51,80 @@ flowchart LR
 
 `anime` 保存作品级元数据，例如标题、年份、类型和总集数；`media_file` 每行对应一个实际媒体文件，通过 `anime_id` 绑定作品，并在 `episode` 字段保存该文件的集号。总集数 `anime.episode_count` 与单文件集号 `media_file.episode` 是两个独立字段。当前可在作品详情中修改单个文件的集号。
 
+### BLAKE2b-256 哈希缓存
+
+文件内容哈希持久化在 `media_file` 表的 `content_hash` 字段中，`hash_algorithm` 记录为 `blake2b-256`；这份缓存属于数据库记录，不使用 `data/cache` 目录。扫描同一路径时，只有数据库中记录的 `size` 和 `modified_ns` 与当前文件完全一致且已有哈希，才直接复用缓存。缓存未命中时，扫描器按 4 MiB 分块读取完整文件并重新计算哈希。
+
+```mermaid
+flowchart TD
+    START[扫描一个视频]
+
+    subgraph LOOKUP["定位已有记录"]
+        PATH["按媒体库与绝对路径查询"]
+        SAME{"大小和纳秒修改时间一致，且已有哈希？"}
+    end
+
+    subgraph HASH["取得内容哈希"]
+        REUSE[复用 content_hash]
+        CALC["分块读取文件并计算 BLAKE2b-256"]
+    end
+
+    subgraph PERSIST["恢复绑定并持久化"]
+        RENAMED{"当前路径是否没有记录？"}
+        MATCH["按媒体库、哈希和 missing 状态查找旧记录"]
+        SAVE["更新或新增 media_file 并提交"]
+    end
+
+    START --> PATH --> SAME
+    SAME -->|是| REUSE
+    SAME -->|否| CALC
+    REUSE --> RENAMED
+    CALC --> RENAMED
+    RENAMED -->|是| MATCH --> SAVE
+    RENAMED -->|否| SAVE
+```
+
+扫描开始时，同一媒体库的旧记录会先标记为 `missing`。因此文件在程序外被改名后，新路径会重新计算哈希，再通过相同的 `content_hash` 找回旧记录及其作品绑定；仅仅依靠哈希找回改名记录并不能省略这次计算。
+
+作品详情和“全部作品”的批量重命名走另一条路径：预览阶段不修改缓存；确认执行后移动文件，只更新 `media_file.path` 和 `relative_path`，保留原来的 `content_hash`、`hash_algorithm`、`size` 和 `modified_ns`。同一媒体库内的正常重命名不改变文件内容和修改时间，因此下次扫描可以直接命中原缓存；如果底层文件属性发生变化，下次扫描会自动重新计算。
+
+```mermaid
+sequenceDiagram
+    actor USER as 用户
+    participant API as 批量重命名接口
+    participant FS as 文件系统
+    participant DB as media_file
+    participant SCAN as 扫描器
+
+    USER->>API: 请求重命名预览
+    API->>DB: 读取 present 文件和现有路径
+    API-->>USER: 返回目标路径与冲突项
+    Note over DB: 预览不修改哈希缓存
+
+    USER->>API: 确认执行
+    API->>FS: 移动视频及关联文件
+    API->>DB: 更新 path 和 relative_path
+    Note over DB: content_hash、算法、大小和修改时间保持不变
+    alt 全部移动和数据库提交成功
+        DB-->>API: 提交成功
+        API-->>USER: 返回新路径
+    else 移动或提交失败
+        API->>DB: 回滚事务
+        API->>FS: 按相反顺序移回文件
+        API-->>USER: 返回错误
+    end
+
+    USER->>SCAN: 下次扫描
+    SCAN->>FS: 读取新路径的大小和修改时间
+    SCAN->>DB: 查询新路径的缓存记录
+    alt 大小和修改时间一致
+        DB-->>SCAN: 复用 content_hash
+    else 文件属性变化
+        SCAN->>FS: 读取完整文件并重新计算
+        SCAN->>DB: 刷新哈希和文件属性
+    end
+```
+
 ### 添加新集与批量重命名
 
 扫描新视频后，可在“待确认”页面的“添加到已绑定作品”区域搜索现有作品并直接加入。该操作只设置分组和视频的 `anime_id`，不会重复创建作品，也不会覆盖已有 AniDB 来源映射。若仍按 AniDB 候选确认，而所选 AID 已绑定到某个作品，系统也会自动复用该作品。
