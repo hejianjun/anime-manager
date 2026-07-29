@@ -2,7 +2,7 @@
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { api, type Anime, type Candidate, type MatchGroup, type MediaFile } from '../api'
-import { groupCandidates } from '../utils'
+import { groupCandidates, matchesMatchGroupSearch } from '../utils'
 
 const groups = ref<MatchGroup[]>([])
 const active = ref<MatchGroup | null>(null)
@@ -12,6 +12,8 @@ const bulkProgress = ref(0)
 const bulkTaskText = ref('')
 const confirming = ref(false)
 const keyword = ref('')
+const groupSearchInput = ref('')
+const groupSearchKeyword = ref('')
 const selections = ref<Record<string, number | null>>({ anidb: null, dmm: null, getchu: null })
 const sources = ref<string[]>([])
 const animeItems = ref<Anime[]>([])
@@ -22,6 +24,9 @@ const playerFile = ref<MediaFile | null>(null)
 let bulkEvents: EventSource | null = null
 const bySource = computed(() => groupCandidates(active.value?.candidates || [], sources.value))
 const playerUrl = computed(() => playerFile.value ? `/api/media-files/${playerFile.value.id}/stream` : '')
+const filteredGroups = computed(() =>
+  groups.value.filter(group => matchesMatchGroupSearch(group, groupSearchKeyword.value)),
+)
 
 async function loadGroups() {
   const items: MatchGroup[] = (
@@ -49,6 +54,13 @@ function selectGroup(group: MatchGroup) {
   selections.value = { anidb: null, dmm: null, getchu: null }
   existingAnimeId.value = null
   group.candidates.filter(item => item.selected).forEach(item => selections.value[item.source] = item.id)
+}
+
+function applyGroupSearch() {
+  groupSearchKeyword.value = groupSearchInput.value.trim()
+  if (active.value && filteredGroups.value.some(group => group.id === active.value?.id)) return
+  active.value = null
+  if (filteredGroups.value.length) selectGroup(filteredGroups.value[0])
 }
 
 function markCoverError(candidateId: number) {
@@ -191,7 +203,12 @@ onBeforeUnmount(() => bulkEvents?.close())
   <div class="split">
     <section class="panel">
       <div class="panel-title">
-        <div><h2>待确认分组</h2><el-tag type="warning">{{ groups.length }}</el-tag></div>
+        <div>
+          <h2>待确认分组</h2>
+          <el-tag type="warning">
+            {{ groupSearchKeyword ? `${filteredGroups.length} / ${groups.length}` : groups.length }}
+          </el-tag>
+        </div>
         <el-button
           size="small"
           type="primary"
@@ -203,6 +220,16 @@ onBeforeUnmount(() => bulkEvents?.close())
           批量确认 100% 匹配
         </el-button>
       </div>
+      <div class="toolbar">
+        <el-input
+          v-model="groupSearchInput"
+          clearable
+          placeholder="搜索番名或文件名"
+          @clear="applyGroupSearch"
+          @keyup.enter="applyGroupSearch"
+        />
+        <el-button type="primary" plain @click="applyGroupSearch">搜索</el-button>
+      </div>
       <div class="group-list">
         <div v-if="bulkSearching || bulkTaskText" class="bulk-match-progress">
           <el-progress
@@ -211,12 +238,13 @@ onBeforeUnmount(() => bulkEvents?.close())
           />
           <span class="muted">{{ bulkTaskText }}</span>
         </div>
-        <article v-for="group in groups" :key="group.id" class="group-card" :class="{ active: active?.id === group.id }" @click="selectGroup(group)">
+        <article v-for="group in filteredGroups" :key="group.id" class="group-card" :class="{ active: active?.id === group.id }" @click="selectGroup(group)">
           <h3>{{ group.display_title }}</h3>
           <span class="muted">{{ group.files.length }} 个文件</span>
           <div v-for="file in group.files.slice(0, 3)" :key="file.id" class="file-pill">{{ file.relative_path }}</div>
         </article>
         <div v-if="!groups.length" class="empty">没有等待确认的作品</div>
+        <div v-else-if="!filteredGroups.length" class="empty">没有匹配该番名或文件名的作品</div>
       </div>
     </section>
 

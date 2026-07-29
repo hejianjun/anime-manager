@@ -1,4 +1,4 @@
-import type { Anime, Candidate } from './api'
+import type { Anime, Candidate, MatchGroup } from './api'
 
 export function groupCandidates(candidates: Candidate[], sources: string[]) {
   return Object.fromEntries(
@@ -12,6 +12,27 @@ export function hasExportBlockers(blockers: string[] | undefined): boolean {
 
 export function taskProgressText(message: string, progress: number): string {
   return `${message} · ${Math.round(progress * 100)}%`
+}
+
+function includesKeyword(values: Array<string | null | undefined>, keyword: string): boolean {
+  const normalizedKeyword = keyword.trim().toLocaleLowerCase()
+  if (!normalizedKeyword) return true
+  return values.some(value => value?.toLocaleLowerCase().includes(normalizedKeyword))
+}
+
+export function matchesMatchGroupSearch(group: MatchGroup, keyword: string): boolean {
+  return includesKeyword([
+    group.display_title,
+    ...group.files.flatMap(file => [file.relative_path, file.path, file.parsed_title]),
+  ], keyword)
+}
+
+export function matchesAnimeSearch(anime: Anime, keyword: string): boolean {
+  return includesKeyword([
+    anime.title,
+    anime.original_title,
+    ...anime.files.flatMap(file => [file.relative_path, file.path, file.parsed_title]),
+  ], keyword)
 }
 
 export interface EpisodeHealth {

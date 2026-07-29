@@ -2,12 +2,14 @@
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { api, type Anime } from '../api'
-import { getEpisodeHealth, hasExportBlockers, missingEpisodeText } from '../utils'
+import { getEpisodeHealth, hasExportBlockers, matchesAnimeSearch, missingEpisodeText } from '../utils'
 
 const items = ref<Anime[]>([])
 type IssueFilter = 'missing' | 'unfilled' | 'directory' | 'nfo' | 'episodeImage'
 
 const issueFilters = ref<IssueFilter[]>([])
+const searchInput = ref('')
+const searchKeyword = ref('')
 const selected = ref<Anime | null>(null)
 const detailOpen = ref(false)
 const previewOpen = ref(false)
@@ -37,8 +39,9 @@ const itemHealth = computed(() =>
   Object.fromEntries(items.value.map(item => [item.id, getEpisodeHealth(item)])),
 )
 const filteredItems = computed(() => {
-  if (!issueFilters.value.length) return items.value
   return items.value.filter((item) => {
+    if (!matchesAnimeSearch(item, searchKeyword.value)) return false
+    if (!issueFilters.value.length) return true
     const health = itemHealth.value[item.id]
     return issueFilters.value.some((filter) => {
       if (filter === 'missing') return health.missingEpisodes.length > 0
@@ -89,6 +92,10 @@ function coverUrl(anime: Anime) {
   return getchu
     ? `/api/sources/getchu/${encodeURIComponent(getchu.source_id)}/cover`
     : anime.cover_url
+}
+
+function applySearch() {
+  searchKeyword.value = searchInput.value.trim()
 }
 
 async function load() {
@@ -304,6 +311,16 @@ onBeforeUnmount(() => bulkRenameEvents?.close())
       <el-progress :percentage="bulkRenameProgress" />
       <span class="muted">{{ bulkRenameTaskText }}</span>
     </div>
+    <div class="toolbar catalog-search">
+      <el-input
+        v-model="searchInput"
+        clearable
+        placeholder="搜索番名或文件名"
+        @clear="applySearch"
+        @keyup.enter="applySearch"
+      />
+      <el-button type="primary" plain @click="applySearch">搜索</el-button>
+    </div>
     <div class="catalog-filter">
       <span class="muted">仅显示</span>
       <el-checkbox-group v-model="issueFilters">
@@ -355,7 +372,7 @@ onBeforeUnmount(() => bulkRenameEvents?.close())
         </div>
       </article>
       <div v-if="!items.length" class="empty">确认候选后，作品会显示在这里</div>
-      <div v-else-if="!filteredItems.length" class="empty">没有符合当前条件的作品</div>
+      <div v-else-if="!filteredItems.length" class="empty">没有符合当前搜索或筛选条件的作品</div>
     </div>
   </section>
 

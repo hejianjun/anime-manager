@@ -3,10 +3,12 @@ import {
   getEpisodeHealth,
   groupCandidates,
   hasExportBlockers,
+  matchesAnimeSearch,
+  matchesMatchGroupSearch,
   missingEpisodeText,
   taskProgressText,
 } from './utils'
-import type { Anime, Candidate, MediaFile } from './api'
+import type { Anime, Candidate, MatchGroup, MediaFile } from './api'
 
 const candidate = (id: number, source: string): Candidate => ({
   id,
@@ -104,5 +106,36 @@ describe('episode health presentation', () => {
   it('shortens long missing episode lists', () => {
     expect(missingEpisodeText([1, 2, 3])).toBe('缺第 1、2、3 集')
     expect(missingEpisodeText([1, 2, 3, 4, 5, 6, 7])).toBe('缺第 1、2、3、4、5、6 等 7 集')
+  })
+})
+
+describe('catalog search', () => {
+  it('matches a pending group by anime title or file name, ignoring case', () => {
+    const group: MatchGroup = {
+      id: 1,
+      display_title: '葬送的芙莉莲',
+      search_keyword: '',
+      status: 'pending',
+      anime_id: null,
+      files: [mediaFile(1, 1)],
+      candidates: [],
+    }
+    group.files[0].relative_path = '[Group] Frieren - 01.mkv'
+
+    expect(matchesMatchGroupSearch(group, '芙莉莲')).toBe(true)
+    expect(matchesMatchGroupSearch(group, 'frieren')).toBe(true)
+    expect(matchesMatchGroupSearch(group, '不存在')).toBe(false)
+  })
+
+  it('matches a bound anime by title, original title, or file name', () => {
+    const item = anime(1, [mediaFile(1, 1)])
+    item.title = '迷宫饭'
+    item.original_title = 'Dungeon Meshi'
+    item.files[0].relative_path = 'Delicious in Dungeon S01E01.mkv'
+
+    expect(matchesAnimeSearch(item, '迷宫饭')).toBe(true)
+    expect(matchesAnimeSearch(item, 'meshi')).toBe(true)
+    expect(matchesAnimeSearch(item, 's01e01')).toBe(true)
+    expect(matchesAnimeSearch(item, '  ')).toBe(true)
   })
 })
