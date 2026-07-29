@@ -114,12 +114,12 @@ def _remaining_sidecars(
     return entries
 
 
-def _cleanup_directory_plan(
+def _cleanup_source_candidates(
     source_dirs: set[Path],
     target_dir: Path,
     library_root: Path,
-) -> tuple[list[dict], list[str]]:
-    """生成旧目录移入 .delete 的计划，并提前检查归档目标冲突。"""
+) -> set[Path]:
+    """筛出位于媒体库内、且不会包含目标目录的顶层源目录。"""
     deletion_dir = (library_root / DELETION_DIRECTORY_NAME).absolute()
     candidates = {
         source_dir.absolute()
@@ -130,11 +130,65 @@ def _cleanup_directory_plan(
         and not source_dir.absolute().is_relative_to(deletion_dir)
         and not target_dir.is_relative_to(source_dir.absolute())
     }
-    top_level_sources = {
+    return {
         source
         for source in candidates
         if not any(source != other and source.is_relative_to(other) for other in candidates)
     }
+
+
+def _classify_source_directories(
+    source_dirs: set[Path],
+    planned_sources: set[Path],
+    target_dir: Path,
+    library_root: Path,
+) -> tuple[set[Path], list[dict]]:
+    """仅把没有本作品计划外文件的目录视为作品独占目录。"""
+    exclusive: set[Path] = set()
+    preserved: list[dict] = []
+    for source_dir in sorted(
+        _cleanup_source_candidates(source_dirs, target_dir, library_root),
+        key=lambda path: str(path).casefold(),
+    ):
+        unexpected: list[Path] = []
+        for path in sorted(source_dir.rglob("*"), key=lambda item: str(item).casefold()):
+            if path.is_dir() and not path.is_symlink():
+                continue
+            resolved = path.absolute()
+            # 目录级海报、NFO 等会在确认独占后加入计划；其他文件说明这是共享目录。
+            if (
+                resolved not in planned_sources
+                and path.suffix.casefold() not in SIDECAR_EXTENSIONS
+            ):
+                unexpected.append(resolved)
+        if unexpected:
+            preserved.append(
+                {
+                    "source": str(source_dir),
+                    "reason": "目录包含本作品计划外的文件，按共享目录保留",
+                    "examples": [
+                        str(path.relative_to(source_dir))
+                        for path in unexpected[:3]
+                    ],
+                }
+            )
+        else:
+            exclusive.add(source_dir)
+    return exclusive, preserved
+
+
+def _cleanup_directory_plan(
+    source_dirs: set[Path],
+    target_dir: Path,
+    library_root: Path,
+) -> tuple[list[dict], list[str]]:
+    """生成旧目录移入 .delete 的计划，并提前检查归档目标冲突。"""
+    deletion_dir = (library_root / DELETION_DIRECTORY_NAME).absolute()
+    top_level_sources = _cleanup_source_candidates(
+        source_dirs,
+        target_dir,
+        library_root,
+    )
     cleanup_dirs: list[dict] = []
     blockers: list[str] = []
     targets: set[Path] = set()
@@ -202,6 +256,7 @@ class _RenamePlanState:
     targets: set[Path] = field(default_factory=set)
     blockers: list[str] = field(default_factory=list)
     source_dirs: set[Path] = field(default_factory=set)
+    preserved_dirs: list[dict] = field(default_factory=list)
     claimed_sidecars: set[Path] = field(default_factory=set)
     directory_cache: dict[Path, list[Path]] = field(default_factory=dict)
 
@@ -332,10 +387,11 @@ def _add_media_rename_entries(
 def _add_remaining_sidecar_entries(
     context: _RenamePlanContext,
     state: _RenamePlanState,
+    source_dirs: set[Path],
 ) -> None:
-    """登记未与具体视频同名匹配的目录级或嵌套附属文件。"""
+    """仅从作品独占目录登记未与具体视频同名匹配的附属文件。"""
     entries = _remaining_sidecars(
-        state.source_dirs,
+        source_dirs,
         context.target_dir,
         state.claimed_sidecars,
         context.library_root,
@@ -362,10 +418,20 @@ def build_rename_plan(anime: Anime, season: int = 1) -> dict:
     )
     for media in ordered_media:
         _add_media_rename_entries(context, state, media)
-    _add_remaining_sidecar_entries(context, state)
+    planned_sources = {
+        Path(item["source"]).absolute()
+        for item in state.files
+    }
+    exclusive_dirs, state.preserved_dirs = _classify_source_directories(
+        state.source_dirs,
+        planned_sources,
+        context.target_dir,
+        context.library_root,
+    )
+    _add_remaining_sidecar_entries(context, state, exclusive_dirs)
 
     cleanup_dirs, cleanup_blockers = _cleanup_directory_plan(
-        state.source_dirs,
+        exclusive_dirs,
         context.target_dir,
         context.library_root,
     )
@@ -379,6 +445,7 @@ def build_rename_plan(anime: Anime, season: int = 1) -> dict:
         "blockers": state.blockers,
         "files": state.files,
         "cleanup_dirs": cleanup_dirs,
+        "preserved_dirs": state.preserved_dirs,
     }
 
 
@@ -393,6 +460,8 @@ class _BulkRenamePlanState:
     cleanup_sources: set[Path] = field(default_factory=set)
     cleanup_targets: dict[Path, tuple[Path, int, str]] = field(default_factory=dict)
     cleanup_dirs: list[dict] = field(default_factory=list)
+    preserved_sources: set[Path] = field(default_factory=set)
+    preserved_dirs: list[dict] = field(default_factory=list)
     included_anime_ids: set[int] = field(default_factory=set)
 
 
@@ -491,6 +560,27 @@ def _merge_bulk_cleanup_dirs(
         )
 
 
+def _merge_bulk_preserved_dirs(
+    state: _BulkRenamePlanState,
+    anime: Anime,
+    plan: dict,
+) -> None:
+    """合并共享目录保留说明，同一源目录在批量预览中只展示一次。"""
+    for item in plan["preserved_dirs"]:
+        source = Path(item["source"])
+        if source in state.preserved_sources:
+            continue
+        state.preserved_sources.add(source)
+        state.preserved_dirs.append(
+            {
+                **item,
+                "anime_id": anime.id,
+                "anime_title": anime.title,
+                "library_root": plan["library_root"],
+            }
+        )
+
+
 def _merge_bulk_anime_plan(
     state: _BulkRenamePlanState,
     anime: Anime,
@@ -501,6 +591,7 @@ def _merge_bulk_anime_plan(
     state.blockers.extend(f"{anime.title}: {item}" for item in plan["blockers"])
     _merge_bulk_files(state, anime, plan)
     _merge_bulk_cleanup_dirs(state, anime, plan)
+    _merge_bulk_preserved_dirs(state, anime, plan)
 
 
 def build_bulk_rename_plan(
@@ -558,6 +649,7 @@ def build_bulk_rename_plan(
         "skipped": state.skipped,
         "files": state.files,
         "cleanup_dirs": state.cleanup_dirs,
+        "preserved_dirs": state.preserved_dirs,
     }
 
 
@@ -611,6 +703,18 @@ def _execute_plan_directories(
             continue
         source = Path(item["source"])
         target = Path(item["target"])
+        remaining = [
+            path
+            for path in source.rglob("*")
+            if path.is_file() or path.is_symlink()
+        ]
+        if remaining:
+            raise AppError(
+                "RENAME_PLAN_STALE",
+                "旧目录仍包含未计划文件，已取消归档",
+                details=[str(path) for path in remaining[:20]],
+                status_code=409,
+            )
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.move(str(source), str(target))
         archived.append((source, target))
@@ -675,7 +779,10 @@ def _validate_planned_file(db: Session, item: dict) -> list[str]:
     return errors
 
 
-def _validate_cleanup_directory(item: dict) -> list[str]:
+def _validate_cleanup_directory(
+    item: dict,
+    planned_sources: set[Path],
+) -> list[str]:
     """复核旧目录归档操作，并将目标严格限制在媒体库的 .delete 下。"""
     root = Path(item["library_root"]).absolute()
     source = Path(item["source"]).absolute()
@@ -694,6 +801,17 @@ def _validate_cleanup_directory(item: dict) -> list[str]:
             errors.append(f"待归档目录不存在或不可访问: {source}")
         if target != source and target.exists():
             errors.append(f".delete 目录中已存在同名文件夹: {target}")
+        if source.is_dir():
+            unexpected = [
+                path.absolute()
+                for path in source.rglob("*")
+                if (path.is_file() or path.is_symlink())
+                and path.absolute() not in planned_sources
+            ]
+            errors.extend(
+                f"待归档目录包含计划外文件: {path}"
+                for path in unexpected[:20]
+            )
     except OSError as error:
         errors.append(f"目录状态检查失败: {source}: {error}")
     return errors
@@ -712,12 +830,16 @@ def validate_bulk_rename_plan(db: Session, plan: dict) -> None:
 
     # 先收集全部变化，确保不会移动一部分后才发现后续路径已经失效。
     errors: list[str] = []
+    planned_sources = {
+        Path(item["source"]).absolute()
+        for item in plan["files"]
+    }
     for item in plan["files"]:
         if item["changed"]:
             errors.extend(_validate_planned_file(db, item))
     for item in plan["cleanup_dirs"]:
         if item["changed"]:
-            errors.extend(_validate_cleanup_directory(item))
+            errors.extend(_validate_cleanup_directory(item, planned_sources))
 
     if errors:
         raise AppError(

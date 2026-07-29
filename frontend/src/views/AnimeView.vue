@@ -438,6 +438,17 @@ onBeforeUnmount(() => bulkRenameEvents?.close())
       <el-table-column prop="target" label="目标路径" min-width="340" show-overflow-tooltip />
     </el-table>
     <el-alert
+      v-if="renamePreview?.preserved_dirs?.length"
+      class="cleanup-preview"
+      type="info"
+      :closable="false"
+      title="检测到共享目录：仅移动计划内文件，原目录及其他文件会保留"
+    >
+      <div v-for="item in renamePreview.preserved_dirs" :key="item.source">
+        {{ item.source }}（{{ item.reason }}）
+      </div>
+    </el-alert>
+    <el-alert
       v-if="renamePreview?.cleanup_dirs?.length"
       class="cleanup-preview"
       type="warning"
@@ -491,6 +502,17 @@ onBeforeUnmount(() => bulkRenameEvents?.close())
       <el-table-column prop="source" label="当前路径" min-width="300" show-overflow-tooltip />
       <el-table-column prop="target" label="目标路径" min-width="340" show-overflow-tooltip />
     </el-table>
+    <el-alert
+      v-if="bulkRenamePreview?.preserved_dirs?.length"
+      class="cleanup-preview"
+      type="info"
+      :closable="false"
+      title="检测到共享目录：仅移动计划内文件，原目录及其他文件会保留"
+    >
+      <div v-for="item in bulkRenamePreview.preserved_dirs" :key="item.source">
+        {{ item.source }}（{{ item.reason }}）
+      </div>
+    </el-alert>
     <el-alert
       v-if="bulkRenamePreview?.cleanup_dirs?.length"
       class="cleanup-preview"

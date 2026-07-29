@@ -126,6 +126,51 @@ def test_rename_plan_and_execute_move_files(tmp_path: Path) -> None:
         assert media.relative_path == str(target.relative_to(tmp_path))
 
 
+def test_rename_preserves_shared_directory_and_other_anime_files(
+    tmp_path: Path,
+) -> None:
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        root = LibraryRoot(path=str(tmp_path))
+        first_anime = Anime(title="作品一")
+        second_anime = Anime(title="作品二")
+        db.add_all([root, first_anime, second_anime])
+        db.flush()
+        shared = tmp_path / "CHS"
+        shared.mkdir()
+        first_source = shared / "First E01.mkv"
+        second_source = shared / "Second E01.mkv"
+        first_source.write_bytes(b"first")
+        second_source.write_bytes(b"second")
+        first_media = add_media(db, root, first_source, 1)
+        second_media = add_media(db, root, second_source, 1)
+        first_media.anime_id = first_anime.id
+        second_media.anime_id = second_anime.id
+        db.commit()
+        db.refresh(first_anime)
+
+        plan = build_rename_plan(first_anime, 1)
+
+        assert [Path(item["source"]) for item in plan["files"]] == [first_source]
+        assert plan["cleanup_dirs"] == []
+        assert plan["preserved_dirs"] == [
+            {
+                "source": str(shared),
+                "reason": "目录包含本作品计划外的文件，按共享目录保留",
+                "examples": [second_source.name],
+            }
+        ]
+
+        result = execute_rename_plan(db, first_anime, 1)
+
+        assert result["archived_dirs"] == []
+        assert shared.is_dir()
+        assert second_source.exists()
+        assert not first_source.exists()
+        assert (tmp_path / "作品一" / "作品一 - S01E01.mkv").exists()
+
+
 def test_rename_moves_and_renames_video_sidecars(tmp_path: Path) -> None:
     engine = create_engine("sqlite:///:memory:")
     Base.metadata.create_all(engine)
@@ -286,9 +331,20 @@ def test_bulk_rename_preview_and_execute_all_anime(tmp_path: Path) -> None:
         assert result["anime_count"] == 2
         assert len(result["moved"]) == 2
         assert all(Path(path).exists() for path in result["moved"])
-        assert result["archived_dirs"] == [str(tmp_path / ".delete" / "incoming")]
+        assert result["archived_dirs"] == []
         assert not first_source.exists()
         assert not second_source.exists()
+        assert first_source.parent.is_dir()
+        assert plan["preserved_dirs"] == [
+            {
+                "source": str(first_source.parent),
+                "reason": "目录包含本作品计划外的文件，按共享目录保留",
+                "examples": [second_source.name],
+                "anime_id": first.id,
+                "anime_title": first.title,
+                "library_root": str(tmp_path),
+            }
+        ]
 
 
 def test_bulk_rename_skips_anime_without_present_files(tmp_path: Path) -> None:
@@ -401,6 +457,36 @@ def test_cached_bulk_rename_revalidates_target_before_moving(tmp_path: Path) -> 
         assert caught.value.code == "RENAME_PLAN_STALE"
         assert source.exists()
         assert target.read_bytes() == b"new conflict"
+
+
+def test_cached_bulk_rename_rejects_new_file_in_cleanup_directory(
+    tmp_path: Path,
+) -> None:
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        root = LibraryRoot(path=str(tmp_path))
+        anime = Anime(title="作品名")
+        db.add_all([root, anime])
+        db.flush()
+        source = tmp_path / "incoming" / "Example E01.mkv"
+        source.parent.mkdir()
+        source.write_bytes(b"source")
+        media = add_media(db, root, source, 1)
+        media.anime_id = anime.id
+        db.commit()
+        db.refresh(anime)
+        plan = build_bulk_rename_plan([anime], 1)
+        unexpected = source.parent / "Late E02.mkv"
+        unexpected.write_bytes(b"late")
+
+        with pytest.raises(AppError) as caught:
+            execute_cached_bulk_rename_plan(db, plan)
+
+        assert caught.value.code == "RENAME_PLAN_STALE"
+        assert source.exists()
+        assert unexpected.exists()
+        assert not Path(plan["files"][0]["target"]).exists()
 
 
 def test_cached_bulk_rename_rolls_back_partial_file_moves(
