@@ -1,3 +1,5 @@
+"""媒体绑定、重命名计划生成、计划复核以及文件移动事务。"""
+
 from __future__ import annotations
 
 import re
@@ -13,8 +15,11 @@ from .models import Anime, MatchGroup, MediaFile
 from .parser import parse_filename
 
 
+# Windows 文件名限制和应用约定的旧目录归档位置。
 INVALID_FILENAME = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 DELETION_DIRECTORY_NAME = ".delete"
+
+# 重命名时随视频一起搬迁的附属文件类型。
 SIDECAR_EXTENSIONS = {
     ".nfo": "nfo",
     ".srt": "subtitle",
@@ -24,6 +29,7 @@ SIDECAR_EXTENSIONS = {
 
 
 def _safe_name(value: str) -> str:
+    """把作品名或集标题转换为可用于 Windows 路径的安全名称。"""
     cleaned = INVALID_FILENAME.sub("_", value).strip().rstrip(".")
     return cleaned or "Untitled"
 
@@ -33,7 +39,7 @@ def _sidecars_for_video(
     target: Path,
     directory_cache: dict[Path, list[Path]] | None = None,
 ) -> list[dict]:
-    """Return episode sidecars whose names are derived from a video name."""
+    """查找与视频同名的 NFO、字幕和图片，并同步生成目标名称。"""
     sidecars: list[dict] = []
     source_stem = source.stem
     folded_stem = source_stem.casefold()
@@ -67,6 +73,7 @@ def _sidecars_for_video(
 
 
 def _recorded_source_directory(media: MediaFile) -> Path | None:
+    """从匹配分组中恢复扫描时记录的原始目录，供目录级附属文件搬迁使用。"""
     group = media.match_group
     prefix = "directory::"
     if not group or not group.group_key.casefold().startswith(prefix):
@@ -80,7 +87,7 @@ def _remaining_sidecars(
     claimed_sources: set[Path],
     library_root: Path,
 ) -> list[dict]:
-    """Move directory-level and nested sidecars while retaining relative names."""
+    """收集尚未归属单集的目录附属文件，并保留其相对目录结构。"""
     entries: list[dict] = []
     for source_dir in sorted(source_dirs, key=lambda path: str(path).casefold()):
         resolved_dir = source_dir.absolute()
@@ -112,6 +119,7 @@ def _cleanup_directory_plan(
     target_dir: Path,
     library_root: Path,
 ) -> tuple[list[dict], list[str]]:
+    """生成旧目录移入 .delete 的计划，并提前检查归档目标冲突。"""
     deletion_dir = (library_root / DELETION_DIRECTORY_NAME).absolute()
     candidates = {
         source_dir.absolute()
@@ -148,6 +156,7 @@ def _cleanup_directory_plan(
 
 
 def bind_group_to_anime(db: Session, group: MatchGroup, anime: Anime) -> Anime:
+    """把待确认分组及其全部媒体文件绑定到已有作品。"""
     group.anime_id = anime.id
     group.status = "confirmed"
     for media in group.files:
@@ -157,86 +166,202 @@ def bind_group_to_anime(db: Session, group: MatchGroup, anime: Anime) -> Anime:
     return anime
 
 
-def build_rename_plan(anime: Anime, season: int = 1) -> dict:
+@dataclass(frozen=True)
+class _RenamePlanContext:
+    """单作品计划生成期间不变的作品、媒体库和目标目录信息。"""
+
+    anime: Anime
+    season: int
+    present: list[MediaFile]
+    library_root: Path
+    target_dir: Path
+    target_dir_exists: bool
+
+
+@dataclass
+class _RenamePlanState:
+    """单作品计划生成期间累计的文件、冲突和目录扫描状态。"""
+
+    files: list[dict] = field(default_factory=list)
+    targets: set[Path] = field(default_factory=set)
+    blockers: list[str] = field(default_factory=list)
+    source_dirs: set[Path] = field(default_factory=set)
+    claimed_sidecars: set[Path] = field(default_factory=set)
+    directory_cache: dict[Path, list[Path]] = field(default_factory=dict)
+
+
+def _prepare_rename_plan(anime: Anime, season: int) -> _RenamePlanContext:
+    """校验单作品的媒体库边界，并准备后续生成计划所需的上下文。"""
     present = [item for item in anime.files if item.status == "present"]
     if not present:
         raise AppError("NO_MEDIA_FILES", "作品没有可用媒体文件", status_code=409)
+
     root_ids = {item.library_root_id for item in present}
     if len(root_ids) != 1:
-        raise AppError("MULTIPLE_LIBRARY_ROOTS", "同一作品跨越多个媒体库，暂不支持批量移动", status_code=409)
+        raise AppError(
+            "MULTIPLE_LIBRARY_ROOTS",
+            "同一作品跨越多个媒体库，暂不支持批量移动",
+            status_code=409,
+        )
 
     library_root = Path(present[0].library_root.path).absolute()
     target_dir = (library_root / _safe_name(anime.title)).absolute()
     if not target_dir.is_relative_to(library_root):
-        raise AppError("PATH_OUTSIDE_LIBRARY", "目标目录越过媒体库边界", status_code=400)
-    target_dir_exists = target_dir.exists()
+        raise AppError(
+            "PATH_OUTSIDE_LIBRARY",
+            "目标目录越过媒体库边界",
+            status_code=400,
+        )
+    return _RenamePlanContext(
+        anime=anime,
+        season=season,
+        present=present,
+        library_root=library_root,
+        target_dir=target_dir,
+        target_dir_exists=target_dir.exists(),
+    )
 
-    files: list[dict] = []
-    targets: set[Path] = set()
-    blockers: list[str] = []
-    source_dirs: set[Path] = set()
-    claimed_sidecars: set[Path] = set()
-    directory_cache: dict[Path, list[Path]] = {}
-    for media in sorted(present, key=lambda item: (item.episode is None, item.episode or 0, item.path)):
-        source = Path(media.path).absolute()
-        source_dirs.add(source.parent)
-        recorded_source_dir = _recorded_source_directory(media)
-        if recorded_source_dir:
-            source_dirs.add(recorded_source_dir)
-        parsed = parse_filename(source)
-        if media.episode is None:
-            blockers.append(f"{media.relative_path} 缺少集号")
-            continue
-        episode_title = (anime.episode_titles or {}).get(str(media.episode)) or parsed.episode_title
-        suffix = f" - {_safe_name(episode_title)}" if episode_title else ""
-        filename = f"{_safe_name(anime.title)} - S{season:02d}E{media.episode:02d}{suffix}{source.suffix.lower()}"
-        target = target_dir / filename
-        entries = [
-            {
-                "media_id": media.id,
-                "source": str(source),
-                "target": str(target),
-                "kind": "video",
+
+def _append_rename_entry(
+    files: list[dict],
+    targets: set[Path],
+    blockers: list[str],
+    entry: dict,
+    *,
+    target_dir_exists: bool,
+    metadata: dict | None = None,
+) -> None:
+    """登记单个重命名条目，并统一执行目标冲突和覆盖检查。"""
+    source = Path(entry["source"])
+    target = Path(entry["target"])
+
+    # 同一作品内的所有视频和附属文件共享目标集合，避免互相覆盖。
+    if target in targets:
+        blockers.append(f"多个文件将写入同一目标: {target}")
+    elif target_dir_exists and target.exists() and target != source:
+        blockers.append(f"目标文件已存在: {target}")
+
+    targets.add(target)
+    files.append(
+        {
+            **entry,
+            **(metadata or {}),
+            "changed": source != target,
+        }
+    )
+
+
+def _episode_target(
+    context: _RenamePlanContext,
+    media: MediaFile,
+    source: Path,
+) -> tuple[Path, str | None]:
+    """根据作品元数据和原文件名生成单集目标路径及最终集标题。"""
+    parsed = parse_filename(source)
+    episode_title = (context.anime.episode_titles or {}).get(
+        str(media.episode)
+    ) or parsed.episode_title
+    suffix = f" - {_safe_name(episode_title)}" if episode_title else ""
+    filename = (
+        f"{_safe_name(context.anime.title)}"
+        f" - S{context.season:02d}E{media.episode:02d}"
+        f"{suffix}{source.suffix.lower()}"
+    )
+    return context.target_dir / filename, episode_title
+
+
+def _add_media_rename_entries(
+    context: _RenamePlanContext,
+    state: _RenamePlanState,
+    media: MediaFile,
+) -> None:
+    """为一个视频及其同名附属文件生成并登记重命名条目。"""
+    source = Path(media.path).absolute()
+    state.source_dirs.add(source.parent)
+    recorded_source_dir = _recorded_source_directory(media)
+    if recorded_source_dir:
+        state.source_dirs.add(recorded_source_dir)
+
+    # 没有集号无法形成稳定的 Jellyfin 文件名，但仍保留源目录供冲突预览。
+    if media.episode is None:
+        state.blockers.append(f"{media.relative_path} 缺少集号")
+        return
+
+    target, episode_title = _episode_target(context, media, source)
+    entries = [
+        {
+            "media_id": media.id,
+            "source": str(source),
+            "target": str(target),
+            "kind": "video",
+        },
+        *_sidecars_for_video(source, target, state.directory_cache),
+    ]
+    for entry in entries:
+        if entry["kind"] != "video":
+            state.claimed_sidecars.add(Path(entry["source"]))
+        _append_rename_entry(
+            state.files,
+            state.targets,
+            state.blockers,
+            entry,
+            target_dir_exists=context.target_dir_exists,
+            metadata={
+                "episode": media.episode,
+                "episode_title": episode_title,
             },
-            *_sidecars_for_video(source, target, directory_cache),
-        ]
-        for entry in entries:
-            entry_source = Path(entry["source"])
-            entry_target = Path(entry["target"])
-            if entry["kind"] != "video":
-                claimed_sidecars.add(entry_source)
-            if entry_target in targets:
-                blockers.append(f"多个文件将写入同一目标: {entry_target}")
-            elif target_dir_exists and entry_target.exists() and entry_target != entry_source:
-                blockers.append(f"目标文件已存在: {entry_target}")
-            targets.add(entry_target)
-            files.append(
-                {
-                    **entry,
-                    "episode": media.episode,
-                    "episode_title": episode_title,
-                    "changed": entry_source != entry_target,
-                }
-            )
-    for entry in _remaining_sidecars(source_dirs, target_dir, claimed_sidecars, library_root):
-        entry_source = Path(entry["source"])
-        entry_target = Path(entry["target"])
-        if entry_target in targets:
-            blockers.append(f"多个文件将写入同一目标: {entry_target}")
-        elif target_dir_exists and entry_target.exists() and entry_target != entry_source:
-            blockers.append(f"目标文件已存在: {entry_target}")
-        targets.add(entry_target)
-        files.append({**entry, "changed": entry_source != entry_target})
-    cleanup_dirs, cleanup_blockers = _cleanup_directory_plan(source_dirs, target_dir, library_root)
-    blockers.extend(cleanup_blockers)
+        )
+
+
+def _add_remaining_sidecar_entries(
+    context: _RenamePlanContext,
+    state: _RenamePlanState,
+) -> None:
+    """登记未与具体视频同名匹配的目录级或嵌套附属文件。"""
+    entries = _remaining_sidecars(
+        state.source_dirs,
+        context.target_dir,
+        state.claimed_sidecars,
+        context.library_root,
+    )
+    for entry in entries:
+        _append_rename_entry(
+            state.files,
+            state.targets,
+            state.blockers,
+            entry,
+            target_dir_exists=context.target_dir_exists,
+        )
+
+
+def build_rename_plan(anime: Anime, season: int = 1) -> dict:
+    """生成单作品的只读重命名预览，不移动文件或修改数据库。"""
+    context = _prepare_rename_plan(anime, season)
+    state = _RenamePlanState()
+
+    # 先登记视频和同名附属文件，再补充尚未认领的目录级附属文件。
+    ordered_media = sorted(
+        context.present,
+        key=lambda item: (item.episode is None, item.episode or 0, item.path),
+    )
+    for media in ordered_media:
+        _add_media_rename_entries(context, state, media)
+    _add_remaining_sidecar_entries(context, state)
+
+    cleanup_dirs, cleanup_blockers = _cleanup_directory_plan(
+        state.source_dirs,
+        context.target_dir,
+        context.library_root,
+    )
+    state.blockers.extend(cleanup_blockers)
     return {
         "anime_id": anime.id,
         "season": season,
-        "library_root": str(library_root),
-        "target_dir": str(target_dir),
-        "deletion_dir": str(library_root / DELETION_DIRECTORY_NAME),
-        "blockers": blockers,
-        "files": files,
+        "library_root": str(context.library_root),
+        "target_dir": str(context.target_dir),
+        "deletion_dir": str(context.library_root / DELETION_DIRECTORY_NAME),
+        "blockers": state.blockers,
+        "files": state.files,
         "cleanup_dirs": cleanup_dirs,
     }
 
@@ -426,7 +551,9 @@ def _execute_plan_files(
     moved: list[tuple[Path, Path]] | None = None,
     progress_callback: Callable[[str], None] | None = None,
 ) -> list[tuple[Path, Path]]:
+    """按计划移动文件、同步媒体路径，并实时记录可供回滚的移动顺序。"""
     moved = moved if moved is not None else []
+    # 先创建全部目标目录，避免移动到一半才因父目录缺失中止。
     target_dirs = {Path(item["target"]).parent for item in plan["files"] if item["changed"]}
     for target_dir in target_dirs:
         target_dir.mkdir(parents=True, exist_ok=True)
@@ -440,6 +567,7 @@ def _execute_plan_files(
         media_id = item.get("media_id")
         media = db.get(MediaFile, media_id) if media_id is not None else None
         if media:
+            # 仅视频条目关联 media_file；字幕、图片等附属文件没有数据库记录。
             media.path = str(target)
             media.relative_path = str(target.relative_to(Path(media.library_root.path).resolve()))
         if progress_callback:
@@ -448,6 +576,7 @@ def _execute_plan_files(
 
 
 def _rollback_moves(moved: list[tuple[Path, Path]]) -> None:
+    """按执行的相反顺序恢复已移动文件或已归档目录。"""
     for source, target in reversed(moved):
         if target.exists() and not source.exists():
             source.parent.mkdir(parents=True, exist_ok=True)
@@ -459,6 +588,7 @@ def _execute_plan_directories(
     archived: list[tuple[Path, Path]] | None = None,
     progress_callback: Callable[[str], None] | None = None,
 ) -> list[tuple[Path, Path]]:
+    """文件全部处理后，将计划中的旧目录归档到媒体库 .delete。"""
     archived = archived if archived is not None else []
     for item in plan["cleanup_dirs"]:
         if not item["changed"]:
@@ -474,6 +604,7 @@ def _execute_plan_directories(
 
 
 def execute_rename_plan(db: Session, anime: Anime, season: int = 1) -> dict:
+    """同步生成并执行单作品计划，失败时同时回滚数据库和文件系统。"""
     plan = build_rename_plan(anime, season)
     if plan["blockers"]:
         raise AppError("RENAME_BLOCKED", "批量重命名前需要处理冲突", details=plan["blockers"], status_code=409)
@@ -490,6 +621,7 @@ def execute_rename_plan(db: Session, anime: Anime, season: int = 1) -> dict:
         }
     except Exception:
         db.rollback()
+        # 目录最后移动、最先回滚，随后再恢复目录内的各个文件。
         _rollback_moves(archived)
         _rollback_moves(moved)
         raise
@@ -585,6 +717,7 @@ def execute_cached_bulk_rename_plan(
     plan: dict,
     progress_callback: Callable[[int, int, str], None] | None = None,
 ) -> dict:
+    """复核并执行已缓存的批量预览计划，不重新扫描全部作品。"""
     validate_bulk_rename_plan(db, plan)
     moved: list[tuple[Path, Path]] = []
     archived: list[tuple[Path, Path]] = []
@@ -611,11 +744,13 @@ def execute_cached_bulk_rename_plan(
         }
     except Exception:
         db.rollback()
+        # 文件系统不受数据库事务管理，必须显式按相反顺序补偿。
         _rollback_moves(archived)
         _rollback_moves(moved)
         raise
 
 
 def execute_bulk_rename_plan(db: Session, animes: list[Anime], season: int = 1) -> dict:
+    """兼容同步调用：即时生成批量计划后交给缓存计划执行器。"""
     plan = build_bulk_rename_plan(animes, season)
     return execute_cached_bulk_rename_plan(db, plan)
