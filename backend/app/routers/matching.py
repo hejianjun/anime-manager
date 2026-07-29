@@ -12,6 +12,7 @@ from ..schemas import (
     AnimeOut,
     BindExistingRequest,
     BulkSearchConfirmRequest,
+    ConfirmMatchRequest,
     MatchGroupOut,
     MatchGroupPatch,
     SearchRequest,
@@ -188,7 +189,11 @@ def update_selections(
 
 
 @router.post("/{group_id}/confirm", response_model=AnimeOut)
-async def confirm(group_id: int, db: Session = Depends(get_db)):
+async def confirm(
+    group_id: int,
+    payload: ConfirmMatchRequest | None = None,
+    db: Session = Depends(get_db),
+):
     group = db.scalar(
         select(MatchGroup)
         .options(selectinload(MatchGroup.files))
@@ -196,7 +201,12 @@ async def confirm(group_id: int, db: Session = Depends(get_db)):
     )
     if not group:
         raise AppError("NOT_FOUND", "匹配分组不存在", status_code=404)
-    anime = await confirm_group(db, group, enabled_scraper_names(db))
+    anime = await confirm_group(
+        db,
+        group,
+        enabled_scraper_names(db),
+        payload.file_ids if payload else None,
+    )
     return db.scalar(
         select(Anime)
         .options(
@@ -219,5 +229,5 @@ def bind_existing(
     anime = db.get(Anime, payload.anime_id)
     if not anime:
         raise AppError("NOT_FOUND", "目标作品不存在", status_code=404)
-    bind_group_to_anime(db, group, anime)
+    bind_group_to_anime(db, group, anime, payload.file_ids)
     return db.scalar(anime_query().where(Anime.id == anime.id))

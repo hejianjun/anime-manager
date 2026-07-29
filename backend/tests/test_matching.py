@@ -186,6 +186,64 @@ async def test_confirm_reuses_anime_with_existing_source_mapping(monkeypatch) ->
         assert db.query(Anime).count() == 1
 
 
+async def test_confirm_can_bind_only_selected_files(monkeypatch) -> None:
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    monkeypatch.setitem(SCRAPERS, "anidb", StubScraper())
+
+    with Session(engine) as db:
+        root = LibraryRoot(path="library")
+        db.add(root)
+        db.flush()
+        group = MatchGroup(
+            library_root_id=root.id,
+            group_key="mixed-folder",
+            display_title="Mixed",
+            search_keyword="Selected title",
+        )
+        db.add(group)
+        db.flush()
+        selected_file = MediaFile(
+            library_root_id=root.id,
+            path="selected.mkv",
+            relative_path="selected.mkv",
+            size=1,
+            modified_ns=1,
+            parsed_title="Selected title",
+            episode=1,
+            match_group_id=group.id,
+        )
+        remaining_file = MediaFile(
+            library_root_id=root.id,
+            path="remaining.mkv",
+            relative_path="remaining.mkv",
+            size=1,
+            modified_ns=1,
+            parsed_title="Other title",
+            episode=1,
+            match_group_id=group.id,
+        )
+        candidate = ScrapeCandidate(
+            match_group_id=group.id,
+            source="anidb",
+            source_id="123",
+            title="Selected title",
+            score=1,
+            selected=True,
+        )
+        db.add_all([selected_file, remaining_file, candidate])
+        db.commit()
+
+        anime = await confirm_group(db, group, file_ids=[selected_file.id])
+
+        assert selected_file.anime_id == anime.id
+        assert selected_file.match_group_id is None
+        assert remaining_file.anime_id is None
+        assert remaining_file.match_group_id == group.id
+        assert group.status == "pending"
+        assert group.anime_id is None
+
+
 async def test_confirm_ignores_candidates_from_disabled_scrapers() -> None:
     engine = create_engine("sqlite:///:memory:")
     Base.metadata.create_all(engine)

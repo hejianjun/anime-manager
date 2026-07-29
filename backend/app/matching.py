@@ -9,12 +9,27 @@ from .errors import AppError
 from .models import (
     Anime,
     MatchGroup,
+    MediaFile,
     ScrapeCandidate,
     ScrapeHistory,
     SourceMapping,
     SourceSnapshot,
 )
 from .scrapers import SCRAPERS, Candidate, SourceMetadata
+
+
+def _selected_group_files(
+    group: MatchGroup, file_ids: list[int] | None
+) -> list[MediaFile]:
+    """返回本次要绑定的组内文件，并拒绝空选择或跨组文件 ID。"""
+    files = list(group.files)
+    if file_ids is None:
+        return files
+    requested = set(file_ids)
+    selected = [media for media in files if media.id in requested]
+    if not requested or len(selected) != len(requested):
+        raise AppError("INVALID_MEDIA_SELECTION", "所选视频不属于当前待确认分组")
+    return selected
 
 
 async def search_group(
@@ -77,6 +92,7 @@ def save_selections(db: Session, group: MatchGroup, selections: dict[str, int | 
 
 
 def _apply_metadata(anime: Anime, metadata: SourceMetadata) -> None:
+    """按人工字段优先原则合并来源元数据，并记录每个字段的来源。"""
     if metadata.is_mock:
         return
     values = asdict(metadata)
@@ -106,20 +122,33 @@ def _apply_metadata(anime: Anime, metadata: SourceMetadata) -> None:
     anime.field_provenance = provenance
 
 
-async def confirm_group(
-    db: Session, group: MatchGroup, enabled_sources: list[str] | None = None
-) -> Anime:
-    selected = db.scalars(
-        select(ScrapeCandidate).where(
-            ScrapeCandidate.match_group_id == group.id,
-            ScrapeCandidate.selected.is_(True),
-        )
-    ).all()
+def _selected_candidates(
+    db: Session,
+    group: MatchGroup,
+    enabled_sources: list[str] | None,
+) -> list[ScrapeCandidate]:
+    """读取人工勾选且当前允许使用的来源候选。"""
+    selected = list(
+        db.scalars(
+            select(ScrapeCandidate).where(
+                ScrapeCandidate.match_group_id == group.id,
+                ScrapeCandidate.selected.is_(True),
+            )
+        ).all()
+    )
     if enabled_sources is not None:
         selected = [item for item in selected if item.source in enabled_sources]
     if not selected:
         raise AppError("NO_SELECTION", "请至少选择一个候选结果")
-    anidb = next((item for item in selected if item.source == "anidb"), None)
+    return selected
+
+
+def _resolve_target_anime(
+    db: Session,
+    group: MatchGroup,
+    selected: list[ScrapeCandidate],
+) -> Anime:
+    """复用分组或来源映射指向的作品；没有既有作品时再创建新作品。"""
     anime = db.get(Anime, group.anime_id) if group.anime_id else None
     mapped_anime_ids = set(
         db.scalars(
@@ -140,44 +169,96 @@ async def confirm_group(
                 status_code=409,
             )
         anime = db.get(Anime, mapped_anime_ids.pop())
-    if not anime:
-        anime = Anime(title=(anidb or selected[0]).title)
-        db.add(anime)
-        db.flush()
+    if anime:
+        return anime
+
+    # AniDB 通常提供更规范的主标题；未选择 AniDB 时使用第一个候选标题。
+    title_candidate = next(
+        (item for item in selected if item.source == "anidb"),
+        selected[0],
+    )
+    anime = Anime(title=title_candidate.title)
+    db.add(anime)
+    db.flush()
+    return anime
+
+
+def _upsert_source_mapping(
+    db: Session,
+    anime: Anime,
+    candidate: ScrapeCandidate,
+) -> None:
+    """同一作品每个来源只保留一个稳定映射，重新选择时更新来源 ID。"""
+    mapping = db.scalar(
+        select(SourceMapping).where(
+            SourceMapping.anime_id == anime.id,
+            SourceMapping.source == candidate.source,
+        )
+    )
+    if mapping:
+        mapping.source_id = candidate.source_id
+        mapping.is_mock = candidate.is_mock
+        return
+    db.add(
+        SourceMapping(
+            anime_id=anime.id,
+            source=candidate.source,
+            source_id=candidate.source_id,
+            is_mock=candidate.is_mock,
+        )
+    )
+
+
+async def _bind_candidate_sources(
+    db: Session,
+    anime: Anime,
+    selected: list[ScrapeCandidate],
+) -> None:
+    """保存来源映射、抓取详情，并为每个成功来源留下刷新历史。"""
+    for candidate in selected:
+        _upsert_source_mapping(db, anime, candidate)
+        metadata = await SCRAPERS[candidate.source].detail(db, candidate.source_id)
+        _apply_metadata(anime, metadata)
+        db.add(
+            ScrapeHistory(
+                anime_id=anime.id,
+                source=candidate.source,
+                success=True,
+                message="确认绑定并获取元数据",
+            )
+        )
+
+
+def _bind_group_files(
+    group: MatchGroup,
+    anime: Anime,
+    files: list[MediaFile],
+) -> None:
+    """绑定所选视频；部分绑定时保留剩余视频所在的待确认分组。"""
+    partial = len(files) < len(group.files)
+    group.anime_id = None if partial else anime.id
+    group.status = "pending" if partial else "confirmed"
+    for media in files:
+        media.anime_id = anime.id
+        if partial:
+            media.match_group_id = None
+
+
+async def confirm_group(
+    db: Session,
+    group: MatchGroup,
+    enabled_sources: list[str] | None = None,
+    file_ids: list[int] | None = None,
+) -> Anime:
+    """确认人工选择，并在同一事务中完成作品、来源和视频绑定。"""
+    selected = _selected_candidates(db, group, enabled_sources)
+    files = _selected_group_files(group, file_ids)
+    if not files:
+        raise AppError("NO_MEDIA_SELECTION", "请至少勾选一个视频")
+    anime = _resolve_target_anime(db, group, selected)
     try:
-        for candidate in selected:
-            mapping = db.scalar(
-                select(SourceMapping).where(
-                    SourceMapping.anime_id == anime.id,
-                    SourceMapping.source == candidate.source,
-                )
-            )
-            if mapping:
-                mapping.source_id = candidate.source_id
-                mapping.is_mock = candidate.is_mock
-            else:
-                db.add(
-                    SourceMapping(
-                        anime_id=anime.id,
-                        source=candidate.source,
-                        source_id=candidate.source_id,
-                        is_mock=candidate.is_mock,
-                    )
-                )
-            metadata = await SCRAPERS[candidate.source].detail(db, candidate.source_id)
-            _apply_metadata(anime, metadata)
-            db.add(
-                ScrapeHistory(
-                    anime_id=anime.id,
-                    source=candidate.source,
-                    success=True,
-                    message="确认绑定并获取元数据",
-                )
-            )
-        group.anime_id = anime.id
-        group.status = "confirmed"
-        for media in group.files:
-            media.anime_id = anime.id
+        await _bind_candidate_sources(db, anime, selected)
+        _bind_group_files(group, anime, files)
         db.commit()
         db.refresh(anime)
         return anime

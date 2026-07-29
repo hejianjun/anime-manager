@@ -155,12 +155,28 @@ def _cleanup_directory_plan(
     return cleanup_dirs, blockers
 
 
-def bind_group_to_anime(db: Session, group: MatchGroup, anime: Anime) -> Anime:
-    """把待确认分组及其全部媒体文件绑定到已有作品。"""
-    group.anime_id = anime.id
-    group.status = "confirmed"
-    for media in group.files:
+def bind_group_to_anime(
+    db: Session,
+    group: MatchGroup,
+    anime: Anime,
+    file_ids: list[int] | None = None,
+) -> Anime:
+    """把待确认分组中选定的媒体文件绑定到已有作品。"""
+    files = list(group.files)
+    if file_ids is not None:
+        requested = set(file_ids)
+        files = [media for media in files if media.id in requested]
+        if not requested or len(files) != len(requested):
+            raise AppError("INVALID_MEDIA_SELECTION", "所选视频不属于当前待确认分组")
+    if not files:
+        raise AppError("NO_MEDIA_SELECTION", "请至少勾选一个视频")
+    partial = len(files) < len(group.files)
+    group.anime_id = None if partial else anime.id
+    group.status = "pending" if partial else "confirmed"
+    for media in files:
         media.anime_id = anime.id
+        if partial:
+            media.match_group_id = None
     db.commit()
     db.refresh(anime)
     return anime

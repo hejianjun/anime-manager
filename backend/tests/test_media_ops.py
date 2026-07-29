@@ -55,6 +55,40 @@ def test_bind_group_adds_files_to_existing_anime(tmp_path: Path) -> None:
         assert db.query(Anime).count() == 1
 
 
+def test_bind_group_can_add_only_selected_files_to_existing_anime(tmp_path: Path) -> None:
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        root = LibraryRoot(path=str(tmp_path))
+        anime = Anime(title="既存作品")
+        db.add_all([root, anime])
+        db.flush()
+        group = MatchGroup(
+            library_root_id=root.id,
+            group_key="group",
+            display_title="Mixed",
+            search_keyword="Mixed",
+        )
+        db.add(group)
+        db.flush()
+        first_path = tmp_path / "First.mp4"
+        second_path = tmp_path / "Second.mp4"
+        first_path.write_bytes(b"first")
+        second_path.write_bytes(b"second")
+        first = add_media(db, root, first_path, 1, group)
+        second = add_media(db, root, second_path, 2, group)
+        db.commit()
+
+        bind_group_to_anime(db, group, anime, [first.id])
+
+        assert first.anime_id == anime.id
+        assert first.match_group_id is None
+        assert second.anime_id is None
+        assert second.match_group_id == group.id
+        assert group.status == "pending"
+        assert group.anime_id is None
+
+
 def test_rename_plan_and_execute_move_files(tmp_path: Path) -> None:
     engine = create_engine("sqlite:///:memory:")
     Base.metadata.create_all(engine)

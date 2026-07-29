@@ -18,6 +18,7 @@ const selections = ref<Record<string, number | null>>({ anidb: null, dmm: null, 
 const sources = ref<string[]>([])
 const animeItems = ref<Anime[]>([])
 const existingAnimeId = ref<number | null>(null)
+const selectedFileIds = ref<number[]>([])
 const coverErrors = ref<Record<number, boolean>>({})
 const playerOpen = ref(false)
 const playerFile = ref<MediaFile | null>(null)
@@ -26,6 +27,9 @@ const bySource = computed(() => groupCandidates(active.value?.candidates || [], 
 const playerUrl = computed(() => playerFile.value ? `/api/media-files/${playerFile.value.id}/stream` : '')
 const filteredGroups = computed(() =>
   groups.value.filter(group => matchesMatchGroupSearch(group, groupSearchKeyword.value)),
+)
+const allFilesSelected = computed(() =>
+  Boolean(active.value?.files.length) && selectedFileIds.value.length === active.value?.files.length,
 )
 
 async function loadGroups() {
@@ -53,7 +57,22 @@ function selectGroup(group: MatchGroup) {
   keyword.value = group.search_keyword
   selections.value = { anidb: null, dmm: null, getchu: null }
   existingAnimeId.value = null
+  selectedFileIds.value = group.files.map(file => file.id)
   group.candidates.filter(item => item.selected).forEach(item => selections.value[item.source] = item.id)
+}
+
+function toggleAllFiles() {
+  selectedFileIds.value = allFilesSelected.value ? [] : (active.value?.files.map(file => file.id) || [])
+}
+
+function updateFileSelection(file: MediaFile, checked: boolean) {
+  selectedFileIds.value = checked
+    ? [...selectedFileIds.value, file.id]
+    : selectedFileIds.value.filter(id => id !== file.id)
+  if (selectedFileIds.value.length === 1) {
+    const selected = active.value?.files.find(item => item.id === selectedFileIds.value[0])
+    if (selected?.parsed_title) keyword.value = selected.parsed_title
+  }
 }
 
 function applyGroupSearch() {
@@ -83,11 +102,15 @@ function closePlayer() {
 }
 
 async function bindExisting() {
-  if (!active.value || !existingAnimeId.value) return
+  if (!active.value || !existingAnimeId.value || !selectedFileIds.value.length) return
   confirming.value = true
   try {
-    const anime = (await api.post(`/match-groups/${active.value.id}/bind-existing`, { anime_id: existingAnimeId.value })).data
-    ElMessage.success(`已添加到「${anime.title}」`)
+    const count = selectedFileIds.value.length
+    const anime = (await api.post(`/match-groups/${active.value.id}/bind-existing`, {
+      anime_id: existingAnimeId.value,
+      file_ids: selectedFileIds.value,
+    })).data
+    ElMessage.success(`已将 ${count} 个视频添加到「${anime.title}」`)
     active.value = null
     await Promise.all([loadGroups(), loadAnime()])
   } catch (error) {
@@ -96,7 +119,7 @@ async function bindExisting() {
 }
 
 async function search() {
-  if (!active.value) return
+  if (!active.value || !selectedFileIds.value.length) return
   searching.value = true
   try {
     await api.patch(`/match-groups/${active.value.id}`, { search_keyword: keyword.value })
@@ -182,12 +205,15 @@ async function bulkSearchConfirm() {
 }
 
 async function confirm() {
-  if (!active.value) return
+  if (!active.value || !selectedFileIds.value.length) return
   confirming.value = true
   try {
     await api.put(`/match-groups/${active.value.id}/selections`, { selections: selections.value })
-    const anime = (await api.post(`/match-groups/${active.value.id}/confirm`)).data
-    ElMessage.success(`已绑定到「${anime.title}」`)
+    const count = selectedFileIds.value.length
+    const anime = (await api.post(`/match-groups/${active.value.id}/confirm`, {
+      file_ids: selectedFileIds.value,
+    })).data
+    ElMessage.success(`已将 ${count} 个视频绑定到「${anime.title}」`)
     active.value = null
     await loadGroups()
   } catch (error) {
@@ -255,15 +281,28 @@ onBeforeUnmount(() => bulkEvents?.close())
         </div>
         <div class="toolbar">
           <el-input v-model="keyword" placeholder="搜索关键词" @keyup.enter="search" />
-          <el-button type="primary" :loading="searching" :disabled="!sources.length" @click="search">搜索已启用来源</el-button>
+          <el-button type="primary" :loading="searching" :disabled="!sources.length || !selectedFileIds.length" @click="search">搜索已启用来源</el-button>
         </div>
         <el-alert v-if="!sources.length" type="warning" :closable="false" title="当前未启用任何爬虫，请先到设置页选择。" />
         <div class="source-section">
-          <div class="source-head">原始视频</div>
+          <div class="source-head media-selection-head">
+            <span>原始视频</span>
+            <span class="muted">已选 {{ selectedFileIds.length }} / {{ active.files.length }}</span>
+            <el-button size="small" text type="primary" @click="toggleAllFiles">
+              {{ allFilesSelected ? '清空' : '全选' }}
+            </el-button>
+          </div>
           <div v-for="file in active.files" :key="file.id" class="media-preview-row">
+            <input
+              type="checkbox"
+              :checked="selectedFileIds.includes(file.id)"
+              :aria-label="`选择 ${file.relative_path}`"
+              @change="updateFileSelection(file, ($event.target as HTMLInputElement).checked)"
+            >
             <span :title="file.relative_path">{{ file.relative_path }}</span>
             <el-button size="small" @click="playMedia(file)">播放</el-button>
           </div>
+          <div v-if="!selectedFileIds.length" class="selection-warning">请至少勾选一个要搜索和绑定的视频</div>
         </div>
         <div v-for="source in sources" :key="source" class="source-section">
           <div class="source-head">
@@ -289,15 +328,15 @@ onBeforeUnmount(() => bulkEvents?.close())
           <div v-if="!bySource[source].length" class="muted">尚无候选</div>
         </div>
         <div style="margin-top: 26px">
-          <el-button type="primary" :loading="confirming" @click="confirm">确认并永久绑定</el-button>
-          <span class="muted" style="margin-left:12px">每个来源最多选择一个</span>
+          <el-button type="primary" :loading="confirming" :disabled="!selectedFileIds.length" @click="confirm">确认并永久绑定</el-button>
+          <span class="muted" style="margin-left:12px">仅绑定已勾选视频；每个来源最多选择一个</span>
         </div>
         <div class="existing-bind">
           <div><p class="eyebrow">EXISTING COLLECTION</p><b>添加到已绑定作品</b></div>
           <el-select v-model="existingAnimeId" filterable clearable placeholder="搜索已有作品" style="min-width: 280px">
             <el-option v-for="anime in animeItems" :key="anime.id" :label="anime.title" :value="anime.id" />
           </el-select>
-          <el-button :disabled="!existingAnimeId" :loading="confirming" @click="bindExisting">直接加入</el-button>
+          <el-button :disabled="!existingAnimeId || !selectedFileIds.length" :loading="confirming" @click="bindExisting">直接加入</el-button>
         </div>
       </template>
       <div v-else class="empty">选择左侧分组开始匹配</div>

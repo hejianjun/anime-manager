@@ -128,9 +128,15 @@ class SelectionRequest(BaseModel):
     selections: dict[str, int | None]
 
 
-# 将待匹配分组直接绑定到已经存在的作品。
+# 确认候选时可只绑定组内勾选的视频；不传时保持原有的整组绑定行为。
+class ConfirmMatchRequest(BaseModel):
+    file_ids: list[int] | None = Field(default=None, min_length=1)
+
+
+# 将待匹配分组直接绑定到已经存在的作品，可限定为组内勾选的视频。
 class BindExistingRequest(BaseModel):
     anime_id: int
+    file_ids: list[int] | None = Field(default=None, min_length=1)
 
 
 # 重命名预览和执行共用的季号参数。
