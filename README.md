@@ -137,6 +137,34 @@ sequenceDiagram
 
 文件扩展名保持不变并规范为小写。集标题来自原文件名中集号之后的文本；缺少集标题时生成 `作品名 - S01E03.ext`。缺少集号、目标文件已经存在或多个文件生成相同目标时，操作会被阻止。确认执行后，程序同步更新 `media_file.path` 和 `relative_path`；不会覆盖已有视频。
 
+## 后端结构
+
+后端使用 FastAPI，并按 HTTP 接口、应用编排和基础设施职责分层：
+
+```text
+backend/app/
+├─ main.py                 # 创建 FastAPI 应用、注册中间件、异常处理和路由
+├─ lifecycle.py            # 数据库初始化、启动清理和定时刷新任务
+├─ task_events.py          # 后台任务的 SSE 事件发布与订阅
+├─ queries.py              # 作品和匹配分组的公共 SQLAlchemy 查询
+├─ source_settings.py      # 数据源开关及默认设置
+├─ routers/                # 按 API 资源划分的 APIRouter
+│  ├─ system.py            # 健康检查和仪表盘
+│  ├─ libraries.py         # 媒体库及扫描任务
+│  ├─ tasks.py             # 后台任务查询和进度事件
+│  ├─ media.py             # 媒体文件维护和播放
+│  ├─ matching.py          # 候选搜索、选择和确认
+│  ├─ anime.py             # 作品、重命名及 NFO/图片输出
+│  ├─ settings.py          # 应用设置
+│  └─ sources.py           # AniDB 与 Getchu 来源接口
+└─ services/
+   └─ bulk_matching.py     # 批量搜索并确认的业务编排
+```
+
+`main.py` 保持为轻量应用入口，启动命令仍为 `app.main:app`。新增接口时，HTTP 参数、依赖注入、状态码和响应模型放在对应的 `routers` 模块；跨多个模型、外部来源或后台任务的流程放在 `services` 或现有业务模块中，避免把业务编排重新堆回入口文件。
+
+接口重构需要保持现有 URL 和 HTTP 方法。`backend/tests/test_api_routes.py` 会对 OpenAPI 操作集合进行契约检查，防止拆分或注册路由时遗漏接口。
+
 ## Windows 启动
 
 要求 Python 3.12+、Node.js 20+，推荐安装 ffprobe 以读取视频参数。
