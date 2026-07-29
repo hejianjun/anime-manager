@@ -70,3 +70,27 @@ export interface Anime {
   files: MediaFile[]
   updated_at: string
 }
+
+interface AnimePage {
+  items: Anime[]
+  total: number
+  page: number
+  page_size: number
+}
+
+export async function getAllAnime(pageSize = 100): Promise<Anime[]> {
+  const first = (await api.get<AnimePage>('/anime', {
+    params: { page: 1, page_size: pageSize },
+  })).data
+  const pageCount = Math.ceil(first.total / first.page_size)
+  if (pageCount <= 1) return first.items
+
+  const remaining = await Promise.all(
+    Array.from({ length: pageCount - 1 }, (_, index) =>
+      api.get<AnimePage>('/anime', {
+        params: { page: index + 2, page_size: first.page_size },
+      }),
+    ),
+  )
+  return first.items.concat(remaining.flatMap(response => response.data.items))
+}

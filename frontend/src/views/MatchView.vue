@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { api, type Anime, type Candidate, type MatchGroup, type MediaFile } from '../api'
+import { api, getAllAnime, type Anime, type Candidate, type MatchGroup, type MediaFile } from '../api'
 import { groupCandidates, matchesMatchGroupSearch } from '../utils'
 
 const groups = ref<MatchGroup[]>([])
@@ -40,7 +40,7 @@ async function loadGroups() {
 }
 
 async function loadAnime() {
-  animeItems.value = (await api.get('/anime', { params: { page_size: 100 } })).data.items
+  animeItems.value = await getAllAnime()
 }
 
 async function loadSettings() {

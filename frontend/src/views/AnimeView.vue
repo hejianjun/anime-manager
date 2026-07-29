@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { api, type Anime } from '../api'
+import { api, getAllAnime, type Anime } from '../api'
 import { getEpisodeHealth, hasExportBlockers, matchesAnimeSearch, missingEpisodeText } from '../utils'
 
 const items = ref<Anime[]>([])
@@ -99,7 +99,7 @@ function applySearch() {
 }
 
 async function load() {
-  items.value = (await api.get('/anime', { params: { page_size: 100 } })).data.items
+  items.value = await getAllAnime()
 }
 
 async function show(item: Anime) {
