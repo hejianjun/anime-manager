@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import mimetypes
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -11,7 +12,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from fastapi import BackgroundTasks, Depends, FastAPI, Query, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse, Response
+from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, selectinload
@@ -62,6 +63,62 @@ from .scrapers import SCRAPERS, AniDBScraper
 
 scheduler = AsyncIOScheduler(timezone="UTC")
 SCRAPER_NAMES = tuple(SCRAPERS)
+task_event_subscribers: dict[int, set[asyncio.Queue[dict[str, Any]]]] = {}
+
+
+def _task_event_payload(task: TaskRecord) -> dict[str, Any]:
+    result = task.result or {}
+    if task.kind == "bulk_search_confirm":
+        result = {
+            key: result.get(key, 0)
+            for key in ("searched", "total", "confirmed", "skipped", "failed")
+        }
+    return {
+        "id": task.id,
+        "kind": task.kind,
+        "status": task.status,
+        "progress": task.progress,
+        "message": task.message,
+        "result": result,
+        "error": task.error,
+    }
+
+
+async def _publish_task_event(task: TaskRecord) -> None:
+    payload = _task_event_payload(task)
+    for queue in tuple(task_event_subscribers.get(task.id, ())):
+        if queue.full():
+            queue.get_nowait()
+        queue.put_nowait(payload)
+
+
+async def _task_event_stream(task_id: int, session_factory=None):
+    factory = session_factory or SessionLocal
+    queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=1)
+    subscribers = task_event_subscribers.setdefault(task_id, set())
+    subscribers.add(queue)
+    try:
+        with factory() as db:
+            task = db.get(TaskRecord, task_id)
+            if not task:
+                return
+            payload = _task_event_payload(task)
+        yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+        if payload["status"] in {"completed", "failed"}:
+            return
+        while True:
+            try:
+                payload = await asyncio.wait_for(queue.get(), timeout=15)
+            except TimeoutError:
+                yield ": keep-alive\n\n"
+                continue
+            yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+            if payload["status"] in {"completed", "failed"}:
+                return
+    finally:
+        subscribers.discard(queue)
+        if not subscribers:
+            task_event_subscribers.pop(task_id, None)
 
 
 def enabled_scraper_names(db: Session) -> list[str]:
@@ -282,6 +339,20 @@ def get_task(task_id: int, db: Session = Depends(get_db)):
     return task
 
 
+@app.get("/api/tasks/{task_id}/events")
+def task_events(task_id: int, db: Session = Depends(get_db)):
+    if not db.get(TaskRecord, task_id):
+        raise AppError("NOT_FOUND", "任务不存在", status_code=404)
+    return StreamingResponse(
+        _task_event_stream(task_id),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache, no-transform",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
 @app.patch("/api/media-files/{media_id}", response_model=dict)
 def patch_media_file(media_id: int, payload: MediaFilePatch, db: Session = Depends(get_db)):
     media = db.get(MediaFile, media_id)
@@ -430,11 +501,13 @@ async def _run_bulk_search_confirm(
                 "items": [],
             }
             db.commit()
+            await _publish_task_event(task)
 
             for index, group in enumerate(groups, start=1):
                 task.message = f"正在匹配 {index}/{total}：{group.display_title}"
                 task.progress = (index - 1) / max(total, 1)
                 db.commit()
+                await _publish_task_event(task)
                 try:
                     candidates, search_errors = await search_group(
                         db, group, group.search_keyword, sources
@@ -505,11 +578,13 @@ async def _run_bulk_search_confirm(
                     "items": items,
                 }
                 db.commit()
+                await _publish_task_event(task)
 
             task.status = "completed"
             task.progress = 1
             task.message = f"批量匹配完成，共处理 {total} 个"
             db.commit()
+            await _publish_task_event(task)
         except Exception as exc:
             db.rollback()
             task = db.get(TaskRecord, task_id)
@@ -522,6 +597,7 @@ async def _run_bulk_search_confirm(
                     "retryable": True,
                 }
                 db.commit()
+                await _publish_task_event(task)
 
 
 @app.post(

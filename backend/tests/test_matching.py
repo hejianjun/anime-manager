@@ -3,7 +3,7 @@ from sqlalchemy.orm import Session
 
 from app.database import Base
 from app.errors import AppError
-from app.main import _run_bulk_search_confirm
+from app.main import _run_bulk_search_confirm, _task_event_stream
 from app.matching import confirm_group
 from app.models import (
     Anime,
@@ -105,6 +105,35 @@ async def test_bulk_search_confirms_only_exact_matches(monkeypatch) -> None:
         } == {"Exact", "Near"}
         assert db.query(MatchGroup).filter_by(status="confirmed").one().display_title == "Exact"
         assert db.query(MatchGroup).filter_by(status="pending").one().display_title == "Near"
+
+
+async def test_task_event_stream_sends_terminal_snapshot() -> None:
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        task = TaskRecord(
+            kind="bulk_search_confirm",
+            status="completed",
+            progress=1,
+            message="批量匹配完成，共处理 2 个",
+            result={"searched": 2},
+        )
+        db.add(task)
+        db.commit()
+        task_id = task.id
+
+    stream = _task_event_stream(task_id, lambda: Session(engine))
+    event = await anext(stream)
+
+    assert event.startswith("data: ")
+    assert '"status": "completed"' in event
+    assert '"progress": 1.0' in event
+    try:
+        await anext(stream)
+    except StopAsyncIteration:
+        pass
+    else:
+        raise AssertionError("terminal SSE stream should close after its snapshot")
 
 
 async def test_confirm_reuses_anime_with_existing_source_mapping(monkeypatch) -> None:

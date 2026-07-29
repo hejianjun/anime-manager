@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { api, type Anime, type Candidate, type MatchGroup, type MediaFile } from '../api'
 import { groupCandidates } from '../utils'
@@ -19,6 +19,7 @@ const existingAnimeId = ref<number | null>(null)
 const coverErrors = ref<Record<number, boolean>>({})
 const playerOpen = ref(false)
 const playerFile = ref<MediaFile | null>(null)
+let bulkEvents: EventSource | null = null
 const bySource = computed(() => groupCandidates(active.value?.candidates || [], sources.value))
 const playerUrl = computed(() => playerFile.value ? `/api/media-files/${playerFile.value.id}/stream` : '')
 
@@ -101,6 +102,36 @@ async function search() {
   } finally { searching.value = false }
 }
 
+function waitForBulkTask(taskId: number): Promise<any> {
+  return new Promise((resolve, reject) => {
+    const events = new EventSource(`/api/tasks/${taskId}/events`)
+    bulkEvents = events
+    events.onmessage = (event) => {
+      try {
+        const current = JSON.parse(event.data)
+        bulkProgress.value = Math.round(current.progress * 100)
+        bulkTaskText.value = current.message
+        if (current.status === 'completed') {
+          events.close()
+          bulkEvents = null
+          resolve(current)
+        } else if (current.status === 'failed') {
+          events.close()
+          bulkEvents = null
+          reject(new Error(current.error?.message || '批量匹配失败'))
+        }
+      } catch (error) {
+        events.close()
+        bulkEvents = null
+        reject(error)
+      }
+    }
+    events.onerror = () => {
+      bulkTaskText.value = '实时进度连接中断，正在自动重连'
+    }
+  })
+}
+
 async function bulkSearchConfirm() {
   if (!groups.value.length) return
   try {
@@ -123,17 +154,7 @@ async function bulkSearchConfirm() {
     const task = (await api.post('/match-groups/bulk-search-confirm', {
       sources: sources.value,
     })).data
-    let current = task
-    for (;;) {
-      current = (await api.get(`/tasks/${task.id}`)).data
-      bulkProgress.value = Math.round(current.progress * 100)
-      bulkTaskText.value = current.message
-      if (current.status === 'completed') break
-      if (current.status === 'failed') {
-        throw new Error(current.error?.message || '批量匹配失败')
-      }
-      await new Promise(resolve => setTimeout(resolve, 800))
-    }
+    const current = await waitForBulkTask(task.id)
     const result = current.result
     const summary = `已搜索 ${result.searched} 个，确认 ${result.confirmed} 个，保留 ${result.skipped} 个`
     if (result.failed) ElMessage.warning(`${summary}，失败 ${result.failed} 个`)
@@ -163,6 +184,7 @@ async function confirm() {
 }
 
 onMounted(() => Promise.all([loadGroups(), loadAnime(), loadSettings()]))
+onBeforeUnmount(() => bulkEvents?.close())
 </script>
 
 <template>
