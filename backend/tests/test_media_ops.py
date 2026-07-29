@@ -105,6 +105,8 @@ def test_rename_moves_and_renames_video_sidecars(tmp_path: Path) -> None:
             source.with_suffix(".srt"): b"subtitle",
             source.with_suffix(".jpg"): b"image",
             source.with_name(f"{source.stem}.ja.srt"): b"japanese subtitle",
+            source.with_suffix(".ass"): b"ass subtitle",
+            source.with_name(f"{source.stem}.zh.ass"): b"chinese ass subtitle",
             source.with_name(f"{source.stem}-thumb.jpg"): b"thumbnail",
         }
         for path, content in sidecars.items():
@@ -134,6 +136,8 @@ def test_rename_moves_and_renames_video_sidecars(tmp_path: Path) -> None:
             "nfo",
             "subtitle",
             "subtitle",
+            "subtitle",
+            "subtitle",
             "video",
         ]
         assert {Path(item["target"]).name for item in plan["files"]} == {
@@ -141,6 +145,8 @@ def test_rename_moves_and_renames_video_sidecars(tmp_path: Path) -> None:
             "作品名 - S01E01.jpg",
             "作品名 - S01E01.srt",
             "作品名 - S01E01.ja.srt",
+            "作品名 - S01E01.ass",
+            "作品名 - S01E01.zh.ass",
             "作品名 - S01E01.nfo",
             "作品名 - S01E01-thumb.jpg",
             "poster.jpg",
@@ -150,7 +156,7 @@ def test_rename_moves_and_renames_video_sidecars(tmp_path: Path) -> None:
 
         result = execute_rename_plan(db, anime, 1)
 
-        assert len(result["moved"]) == 9
+        assert len(result["moved"]) == 11
         assert all(Path(path).exists() for path in result["moved"])
         assert all(not path.exists() for path in [source, *sidecars])
         assert all(not path.exists() for path in directory_sidecars)
@@ -264,4 +270,32 @@ def test_bulk_rename_skips_anime_without_present_files(tmp_path: Path) -> None:
         assert plan["blockers"] == []
         assert plan["skipped"] == [
             {"anime_id": anime.id, "title": "没有文件", "reason": "没有可用媒体文件"}
+        ]
+
+
+def test_bulk_rename_skips_anime_whose_directory_name_already_matches(
+    tmp_path: Path,
+) -> None:
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        root = LibraryRoot(path=str(tmp_path))
+        anime = Anime(title="作品名")
+        db.add_all([root, anime])
+        db.flush()
+        directory = tmp_path / "作品名"
+        directory.mkdir()
+        source = directory / "旧文件名 E01.mkv"
+        source.write_bytes(b"episode")
+        media = add_media(db, root, source, 1)
+        media.anime_id = anime.id
+        db.commit()
+        db.refresh(anime)
+
+        plan = build_bulk_rename_plan([anime], 1)
+
+        assert plan["anime_count"] == 0
+        assert plan["files"] == []
+        assert plan["skipped"] == [
+            {"anime_id": anime.id, "title": "作品名", "reason": "目录名已一致"}
         ]

@@ -17,6 +17,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, selectinload
 
 from .config import settings
+from .bulk_artifacts import build_bulk_artifact_plan, execute_bulk_artifact_plan
 from .database import Base, SessionLocal, engine, get_db
 from .errors import AppError
 from .exporter import build_export_plan, export_anime, public_export_plan
@@ -754,6 +755,34 @@ def rename_all_preview(payload: RenameRequest, db: Session = Depends(get_db)):
 def rename_all_files(payload: RenameRequest, db: Session = Depends(get_db)):
     animes = db.scalars(_anime_query().order_by(Anime.title)).unique().all()
     return execute_bulk_rename_plan(db, list(animes), payload.season)
+
+
+@app.post("/api/anime/artifacts-preview")
+def bulk_artifacts_preview(db: Session = Depends(get_db)):
+    animes = db.scalars(_anime_query().order_by(Anime.title)).unique().all()
+    return build_bulk_artifact_plan(list(animes))
+
+
+def _run_bulk_artifacts(task_id: int) -> None:
+    with SessionLocal() as db:
+        task = db.get(TaskRecord, task_id)
+        if not task:
+            return
+        animes = db.scalars(_anime_query().order_by(Anime.title)).unique().all()
+        execute_bulk_artifact_plan(db, list(animes), task)
+
+
+@app.post("/api/anime/artifacts", response_model=TaskOut, status_code=202)
+def start_bulk_artifacts(
+    background: BackgroundTasks,
+    db: Session = Depends(get_db),
+):
+    task = TaskRecord(kind="bulk_artifacts", message="等待批量写入")
+    db.add(task)
+    db.commit()
+    db.refresh(task)
+    background.add_task(_run_bulk_artifacts, task.id)
+    return task
 
 
 @app.get("/api/anime/{anime_id}/export-preview")

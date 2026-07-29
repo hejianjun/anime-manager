@@ -16,6 +16,7 @@ DELETION_DIRECTORY_NAME = ".delete"
 SIDECAR_EXTENSIONS = {
     ".nfo": "nfo",
     ".srt": "subtitle",
+    ".ass": "subtitle",
     ".jpg": "image",
 }
 
@@ -25,12 +26,24 @@ def _safe_name(value: str) -> str:
     return cleaned or "Untitled"
 
 
-def _sidecars_for_video(source: Path, target: Path) -> list[dict]:
+def _sidecars_for_video(
+    source: Path,
+    target: Path,
+    directory_cache: dict[Path, list[Path]] | None = None,
+) -> list[dict]:
     """Return episode sidecars whose names are derived from a video name."""
     sidecars: list[dict] = []
     source_stem = source.stem
     folded_stem = source_stem.casefold()
-    for path in sorted(source.parent.iterdir(), key=lambda item: item.name.casefold()):
+    cache = directory_cache if directory_cache is not None else {}
+    directory_files = cache.get(source.parent)
+    if directory_files is None:
+        directory_files = sorted(
+            source.parent.iterdir(),
+            key=lambda item: item.name.casefold(),
+        )
+        cache[source.parent] = directory_files
+    for path in directory_files:
         if not path.is_file() or path == source or not path.name.casefold().startswith(folded_stem):
             continue
         remainder = path.name[len(source_stem):]
@@ -68,14 +81,14 @@ def _remaining_sidecars(
     """Move directory-level and nested sidecars while retaining relative names."""
     entries: list[dict] = []
     for source_dir in sorted(source_dirs, key=lambda path: str(path).casefold()):
-        resolved_dir = source_dir.resolve()
+        resolved_dir = source_dir.absolute()
         if (
             not resolved_dir.is_dir()
             or not resolved_dir.is_relative_to(library_root)
         ):
             continue
         for path in sorted(resolved_dir.rglob("*"), key=lambda item: str(item).casefold()):
-            resolved_path = path.resolve()
+            resolved_path = path.absolute()
             kind = SIDECAR_EXTENSIONS.get(path.suffix.casefold())
             if not path.is_file() or not kind or resolved_path in claimed_sources:
                 continue
@@ -97,15 +110,15 @@ def _cleanup_directory_plan(
     target_dir: Path,
     library_root: Path,
 ) -> tuple[list[dict], list[str]]:
-    deletion_dir = (library_root / DELETION_DIRECTORY_NAME).resolve()
+    deletion_dir = (library_root / DELETION_DIRECTORY_NAME).absolute()
     candidates = {
-        source_dir.resolve()
+        source_dir.absolute()
         for source_dir in source_dirs
-        if source_dir.resolve().is_dir()
-        and source_dir.resolve().is_relative_to(library_root)
-        and source_dir.resolve() not in {library_root, target_dir, deletion_dir}
-        and not source_dir.resolve().is_relative_to(deletion_dir)
-        and not target_dir.is_relative_to(source_dir.resolve())
+        if source_dir.absolute().is_dir()
+        and source_dir.absolute().is_relative_to(library_root)
+        and source_dir.absolute() not in {library_root, target_dir, deletion_dir}
+        and not source_dir.absolute().is_relative_to(deletion_dir)
+        and not target_dir.is_relative_to(source_dir.absolute())
     }
     top_level_sources = {
         source
@@ -150,18 +163,20 @@ def build_rename_plan(anime: Anime, season: int = 1) -> dict:
     if len(root_ids) != 1:
         raise AppError("MULTIPLE_LIBRARY_ROOTS", "同一作品跨越多个媒体库，暂不支持批量移动", status_code=409)
 
-    library_root = Path(present[0].library_root.path).resolve()
-    target_dir = (library_root / _safe_name(anime.title)).resolve()
+    library_root = Path(present[0].library_root.path).absolute()
+    target_dir = (library_root / _safe_name(anime.title)).absolute()
     if not target_dir.is_relative_to(library_root):
         raise AppError("PATH_OUTSIDE_LIBRARY", "目标目录越过媒体库边界", status_code=400)
+    target_dir_exists = target_dir.exists()
 
     files: list[dict] = []
     targets: set[Path] = set()
     blockers: list[str] = []
     source_dirs: set[Path] = set()
     claimed_sidecars: set[Path] = set()
+    directory_cache: dict[Path, list[Path]] = {}
     for media in sorted(present, key=lambda item: (item.episode is None, item.episode or 0, item.path)):
-        source = Path(media.path).resolve()
+        source = Path(media.path).absolute()
         source_dirs.add(source.parent)
         recorded_source_dir = _recorded_source_directory(media)
         if recorded_source_dir:
@@ -181,7 +196,7 @@ def build_rename_plan(anime: Anime, season: int = 1) -> dict:
                 "target": str(target),
                 "kind": "video",
             },
-            *_sidecars_for_video(source, target),
+            *_sidecars_for_video(source, target, directory_cache),
         ]
         for entry in entries:
             entry_source = Path(entry["source"])
@@ -190,7 +205,7 @@ def build_rename_plan(anime: Anime, season: int = 1) -> dict:
                 claimed_sidecars.add(entry_source)
             if entry_target in targets:
                 blockers.append(f"多个文件将写入同一目标: {entry_target}")
-            elif entry_target.exists() and entry_target != entry_source:
+            elif target_dir_exists and entry_target.exists() and entry_target != entry_source:
                 blockers.append(f"目标文件已存在: {entry_target}")
             targets.add(entry_target)
             files.append(
@@ -206,7 +221,7 @@ def build_rename_plan(anime: Anime, season: int = 1) -> dict:
         entry_target = Path(entry["target"])
         if entry_target in targets:
             blockers.append(f"多个文件将写入同一目标: {entry_target}")
-        elif entry_target.exists() and entry_target != entry_source:
+        elif target_dir_exists and entry_target.exists() and entry_target != entry_source:
             blockers.append(f"目标文件已存在: {entry_target}")
         targets.add(entry_target)
         files.append({**entry, "changed": entry_source != entry_target})
@@ -236,6 +251,9 @@ def build_bulk_rename_plan(animes: list[Anime], season: int = 1) -> dict:
     for anime in animes:
         if not any(item.status == "present" for item in anime.files):
             skipped.append({"anime_id": anime.id, "title": anime.title, "reason": "没有可用媒体文件"})
+            continue
+        if not anime.catalog_health["directory_name_mismatch"]:
+            skipped.append({"anime_id": anime.id, "title": anime.title, "reason": "目录名已一致"})
             continue
         try:
             plan = build_rename_plan(anime, season)

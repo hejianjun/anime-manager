@@ -20,6 +20,11 @@ const renameSeason = ref(1)
 const bulkRenameOpen = ref(false)
 const bulkRenamePreview = ref<any>(null)
 const bulkRenameSeason = ref(1)
+const bulkArtifactOpen = ref(false)
+const bulkArtifactPreview = ref<any>(null)
+const bulkArtifactRunning = ref(false)
+const bulkArtifactProgress = ref(0)
+const bulkArtifactTaskText = ref('')
 const coverErrors = ref<Record<number, boolean>>({})
 
 const itemHealth = computed(() =>
@@ -61,6 +66,12 @@ const renameKindLabels: Record<string, string> = {
   nfo: 'NFO',
   subtitle: '字幕',
   image: '图片',
+}
+const artifactKindLabels: Record<string, string> = {
+  tvshow_nfo: '作品 NFO',
+  episode_nfo: '剧集 NFO',
+  movie_nfo: '电影 NFO',
+  episode_image: '剧集图片',
 }
 
 function markCoverError(animeId: number) {
@@ -176,6 +187,53 @@ async function renameAllFiles() {
   finally { busy.value = false }
 }
 
+async function previewBulkArtifacts() {
+  busy.value = true
+  try {
+    bulkArtifactPreview.value = (await api.post('/anime/artifacts-preview')).data
+    bulkArtifactProgress.value = 0
+    bulkArtifactTaskText.value = ''
+    bulkArtifactOpen.value = true
+  } catch (error) { ElMessage.error((error as Error).message) }
+  finally { busy.value = false }
+}
+
+async function writeBulkArtifacts() {
+  if (
+    bulkArtifactPreview.value?.blockers?.length
+    || !bulkArtifactPreview.value?.files?.length
+  ) return
+  await ElMessageBox.confirm(
+    `将补写 ${bulkArtifactPreview.value.nfo_count} 个 NFO，并生成 ${bulkArtifactPreview.value.episode_image_count} 张剧集图片；已有文件不会覆盖。确认继续？`,
+    '批量写入确认',
+    { type: 'warning' },
+  )
+  bulkArtifactRunning.value = true
+  bulkArtifactProgress.value = 0
+  bulkArtifactTaskText.value = '正在启动批量写入'
+  try {
+    const task = (await api.post('/anime/artifacts')).data
+    let current = task
+    for (;;) {
+      current = (await api.get(`/tasks/${task.id}`)).data
+      bulkArtifactProgress.value = Math.round(current.progress * 100)
+      bulkArtifactTaskText.value = current.message
+      if (current.status === 'completed') break
+      if (current.status === 'failed') {
+        throw new Error(current.error?.message || '批量写入失败')
+      }
+      await new Promise(resolve => setTimeout(resolve, 800))
+    }
+    const result = current.result
+    const summary = `已写入 ${result.written.length} 个文件，跳过已有 ${result.existing.length} 个`
+    if (result.failed.length) ElMessage.warning(`${summary}，失败 ${result.failed.length} 个`)
+    else ElMessage.success(summary)
+    bulkArtifactOpen.value = false
+    await load()
+  } catch (error) { ElMessage.error((error as Error).message) }
+  finally { bulkArtifactRunning.value = false }
+}
+
 onMounted(load)
 </script>
 
@@ -185,7 +243,8 @@ onMounted(load)
       <div><p class="eyebrow">CATALOG</p><h2>已绑定作品</h2></div>
       <div class="panel-actions">
         <span class="muted">{{ filteredItems.length }} / {{ items.length }} 部</span>
-        <el-button :loading="busy" @click="previewBulkRename">全部批量重命名</el-button>
+        <el-button :loading="busy" @click="previewBulkArtifacts">批量写入 NFO/剧集图片</el-button>
+        <el-button :loading="busy" @click="previewBulkRename">全部批量重命名（仅目录不一致）</el-button>
       </div>
     </div>
     <div class="catalog-filter">
@@ -320,12 +379,12 @@ onMounted(load)
     </template>
   </el-dialog>
 
-  <el-dialog v-model="bulkRenameOpen" width="min(1100px, 96vw)" title="全部已匹配作品批量重命名预览">
+  <el-dialog v-model="bulkRenameOpen" width="min(1100px, 96vw)" title="目录名不一致作品批量重命名预览">
     <div class="toolbar">
       <span>季度</span>
       <el-input-number v-model="bulkRenameSeason" :min="0" :max="99" @change="previewBulkRename" />
       <span class="muted">
-        {{ bulkRenamePreview?.anime_count || 0 }} 部作品 ·
+        {{ bulkRenamePreview?.anime_count || 0 }} 部目录名不一致作品 ·
         {{ bulkRenamePreview?.changed_count || 0 }} 个文件需要处理 ·
         {{ bulkRenamePreview?.cleanup_count || 0 }} 个旧文件夹需要归档 ·
         {{ bulkRenamePreview?.skipped?.length || 0 }} 部无可用文件
@@ -370,6 +429,67 @@ onMounted(load)
         @click="renameAllFiles"
       >
         确认全部移动并重命名
+      </el-button>
+    </template>
+  </el-dialog>
+
+  <el-dialog v-model="bulkArtifactOpen" width="min(1050px, 96vw)" title="批量写入 NFO 和剧集图片预览">
+    <div class="toolbar">
+      <span class="muted">
+        {{ bulkArtifactPreview?.anime_count || 0 }} 部作品 ·
+        {{ bulkArtifactPreview?.nfo_count || 0 }} 个 NFO ·
+        {{ bulkArtifactPreview?.episode_image_count || 0 }} 张剧集图片 ·
+        {{ bulkArtifactPreview?.skipped?.length || 0 }} 个跳过项
+      </span>
+    </div>
+    <el-alert
+      v-if="bulkArtifactPreview?.blockers?.length"
+      type="error"
+      :closable="false"
+      title="存在阻塞项"
+    >
+      <div v-for="item in bulkArtifactPreview.blockers" :key="item">{{ item }}</div>
+    </el-alert>
+    <el-alert
+      v-else-if="!bulkArtifactPreview?.files?.length"
+      type="success"
+      :closable="false"
+      title="NFO 和剧集图片均已齐全，无需写入"
+    />
+    <div v-if="bulkArtifactRunning || bulkArtifactTaskText" class="bulk-match-progress">
+      <el-progress
+        :percentage="bulkArtifactProgress"
+        :status="bulkArtifactProgress === 100 ? 'success' : undefined"
+      />
+      <span class="muted">{{ bulkArtifactTaskText }}</span>
+    </div>
+    <el-table :data="bulkArtifactPreview?.files || []" size="small" max-height="560">
+      <el-table-column prop="anime_title" label="作品" min-width="220" show-overflow-tooltip />
+      <el-table-column label="类型" width="110">
+        <template #default="{ row }">{{ artifactKindLabels[row.kind] || row.kind }}</template>
+      </el-table-column>
+      <el-table-column prop="path" label="写入路径" min-width="430" show-overflow-tooltip />
+    </el-table>
+    <el-alert
+      v-if="bulkArtifactPreview?.skipped?.length"
+      class="cleanup-preview"
+      type="warning"
+      :closable="false"
+      title="以下项目将跳过"
+    >
+      <div v-for="(item, index) in bulkArtifactPreview.skipped" :key="`${item.anime_id}-${index}`">
+        {{ item.title }}：{{ item.reason }}
+      </div>
+    </el-alert>
+    <template #footer>
+      <el-button :disabled="bulkArtifactRunning" @click="bulkArtifactOpen = false">取消</el-button>
+      <el-button
+        type="primary"
+        :disabled="Boolean(bulkArtifactPreview?.blockers?.length) || !bulkArtifactPreview?.files?.length"
+        :loading="bulkArtifactRunning"
+        @click="writeBulkArtifacts"
+      >
+        确认补写
       </el-button>
     </template>
   </el-dialog>
