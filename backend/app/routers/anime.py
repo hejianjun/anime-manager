@@ -4,6 +4,12 @@ from sqlalchemy.orm import Session, selectinload
 
 from ..bulk_artifacts import build_bulk_artifact_plan, execute_bulk_artifact_plan
 from ..database import SessionLocal, get_db
+from ..description_translation import (
+    apply_description_translation,
+    auto_translation_enabled,
+    description_needs_translation,
+    translate_description_text,
+)
 from ..errors import AppError
 from ..exporter import build_export_plan, export_anime, public_export_plan
 from ..matching import refresh_anime
@@ -88,6 +94,22 @@ async def refresh(anime_id: int, db: Session = Depends(get_db)):
     if not anime:
         raise AppError("NOT_FOUND", "作品不存在", status_code=404)
     return await refresh_anime(db, anime, enabled_scraper_names(db))
+
+
+@router.post("/{anime_id}/translate-description", response_model=AnimeOut)
+async def translate_description(anime_id: int, db: Session = Depends(get_db)):
+    anime = db.scalar(anime_query().where(Anime.id == anime_id))
+    if not anime:
+        raise AppError("NOT_FOUND", "作品不存在", status_code=404)
+    source = (anime.description or "").strip()
+    if not source:
+        raise AppError("DESCRIPTION_EMPTY", "当前作品没有可翻译的简介")
+
+    translated = await translate_description_text(db, source)
+    apply_description_translation(anime, translated)
+    db.commit()
+    db.refresh(anime)
+    return anime
 
 
 @router.delete("/{anime_id}/media-files/{media_id}", response_model=dict)
@@ -176,16 +198,24 @@ def rename_all_files(
 @router.post("/artifacts-preview")
 def bulk_artifacts_preview(db: Session = Depends(get_db)):
     animes = db.scalars(anime_query().order_by(Anime.title)).unique().all()
-    return build_bulk_artifact_plan(list(animes))
+    plan = build_bulk_artifact_plan(list(animes))
+    candidates = {
+        anime.id
+        for anime in animes
+        if anime.id in plan["_nfo_anime_ids"] and description_needs_translation(anime)
+    }
+    plan["auto_translate_description"] = auto_translation_enabled(db)
+    plan["translation_candidate_count"] = len(candidates)
+    return plan
 
 
-def run_bulk_artifacts(task_id: int) -> None:
+async def run_bulk_artifacts(task_id: int) -> None:
     with SessionLocal() as db:
         task = db.get(TaskRecord, task_id)
         if not task:
             return
         animes = db.scalars(anime_query().order_by(Anime.title)).unique().all()
-        execute_bulk_artifact_plan(db, list(animes), task)
+        await execute_bulk_artifact_plan(db, list(animes), task)
 
 
 @router.post("/artifacts", response_model=TaskOut, status_code=202)

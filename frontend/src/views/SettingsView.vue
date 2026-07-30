@@ -12,6 +12,15 @@ const form = reactive({
   proxy_url: '',
   request_interval_seconds: 2.1,
   scheduled_refresh: false,
+  auto_translate_description: false,
+  translation_provider: 'openai',
+  translation_base_url: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+  translation_api_key: '',
+  translation_model: 'qwen-max',
+  translation_timeout_seconds: 60,
+  tmt_secret_id: '',
+  tmt_secret_key: '',
+  tmt_region: 'ap-guangzhou',
 })
 const status = ref<any>({})
 const busy = ref(false)
@@ -76,6 +85,41 @@ onMounted(load)
           <el-input-number v-model="form.request_interval_seconds" :min="2" :step="0.1" />
         </el-form-item>
         <el-form-item><el-switch v-model="form.scheduled_refresh" /> <span style="margin-left:10px">启用作品定期刷新</span></el-form-item>
+        <el-divider content-position="left">简介翻译</el-divider>
+        <el-form-item>
+          <el-switch v-model="form.auto_translate_description" />
+          <span style="margin-left:10px">自动翻译抓取到的简介</span>
+        </el-form-item>
+        <el-form-item label="翻译服务">
+          <el-radio-group v-model="form.translation_provider">
+            <el-radio-button value="openai">OpenAI 兼容</el-radio-button>
+            <el-radio-button value="tmt">腾讯云 TMT</el-radio-button>
+          </el-radio-group>
+        </el-form-item>
+        <el-form-item v-if="form.translation_provider === 'openai'" label="Base URL">
+          <el-input v-model="form.translation_base_url" placeholder="例如 https://api.openai.com/v1" />
+        </el-form-item>
+        <el-form-item v-if="form.translation_provider === 'openai'" label="API Key">
+          <el-input v-model="form.translation_api_key" type="password" show-password />
+        </el-form-item>
+        <el-form-item v-if="form.translation_provider === 'openai'" label="模型">
+          <el-input v-model="form.translation_model" placeholder="例如 qwen-max 或 gpt-4o" />
+        </el-form-item>
+        <el-form-item v-if="form.translation_provider === 'openai'" label="超时（秒）">
+          <el-input-number v-model="form.translation_timeout_seconds" :min="1" :max="300" />
+        </el-form-item>
+        <template v-else>
+          <el-form-item label="SecretId">
+            <el-input v-model="form.tmt_secret_id" type="password" show-password />
+          </el-form-item>
+          <el-form-item label="SecretKey">
+            <el-input v-model="form.tmt_secret_key" type="password" show-password />
+          </el-form-item>
+          <el-form-item label="地域">
+            <el-input v-model="form.tmt_region" placeholder="例如 ap-guangzhou" />
+          </el-form-item>
+        </template>
+        <p class="setting-help">支持 OpenAI Chat Completions 兼容接口和腾讯云 TMT；自动识别源语言，翻译目标固定为简体中文。</p>
         <el-button type="primary" :loading="busy" @click="save">保存设置</el-button>
       </el-form>
       <div>

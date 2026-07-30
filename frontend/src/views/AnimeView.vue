@@ -132,6 +132,26 @@ async function refresh() {
   finally { busy.value = false }
 }
 
+async function translateDescription() {
+  if (!selected.value?.description) return
+  try {
+    await ElMessageBox.confirm(
+      '翻译结果将覆盖当前简介，并在后续元数据刷新时保留。确认继续？',
+      '翻译简介',
+      { type: 'warning', confirmButtonText: '开始翻译', cancelButtonText: '取消' },
+    )
+  } catch {
+    return
+  }
+  busy.value = true
+  try {
+    selected.value = (await api.post(`/anime/${selected.value.id}/translate-description`)).data
+    await load()
+    ElMessage.success('简介已翻译为简体中文')
+  } catch (error) { ElMessage.error((error as Error).message) }
+  finally { busy.value = false }
+}
+
 async function showPreview() {
   if (!selected.value) return
   try {
@@ -305,7 +325,7 @@ async function writeBulkArtifacts() {
     || !bulkArtifactPreview.value?.files?.length
   ) return
   await ElMessageBox.confirm(
-    `将补写 ${bulkArtifactPreview.value.nfo_count} 个 NFO、${bulkArtifactPreview.value.poster_count} 张作品主图，并生成 ${bulkArtifactPreview.value.episode_image_count} 张剧集图片；已有文件不会覆盖。确认继续？`,
+    `将补写 ${bulkArtifactPreview.value.nfo_count} 个 NFO、${bulkArtifactPreview.value.poster_count} 张作品主图，并生成 ${bulkArtifactPreview.value.episode_image_count} 张剧集图片${bulkArtifactPreview.value.auto_translate_description ? `；写入前自动翻译约 ${bulkArtifactPreview.value.translation_candidate_count} 部作品简介` : ''}；已有文件不会覆盖。确认继续？`,
     '批量写入确认',
     { type: 'warning' },
   )
@@ -326,8 +346,10 @@ async function writeBulkArtifacts() {
       await new Promise(resolve => setTimeout(resolve, 800))
     }
     const result = current.result
-    const summary = `已写入 ${result.written.length} 个文件，跳过已有 ${result.existing.length} 个`
-    if (result.failed.length) ElMessage.warning(`${summary}，失败 ${result.failed.length} 个`)
+    const summary = `已写入 ${result.written.length} 个文件，跳过已有 ${result.existing.length} 个，翻译简介 ${result.translated_anime_ids?.length || 0} 部`
+    if (result.failed.length || result.translation_failed?.length) {
+      ElMessage.warning(`${summary}，文件失败 ${result.failed.length} 个，翻译失败 ${result.translation_failed?.length || 0} 部`)
+    }
     else ElMessage.success(summary)
     bulkArtifactOpen.value = false
     await load()
@@ -431,7 +453,17 @@ onBeforeUnmount(() => bulkRenameEvents?.close())
           >
           <span v-else>NO COVER</span>
         </div>
-        <p class="muted">{{ selected.description || '暂无简介' }}</p>
+        <div>
+          <p class="muted">{{ selected.description || '暂无简介' }}</p>
+          <el-button
+            v-if="selected.description"
+            size="small"
+            :loading="busy"
+            @click="translateDescription"
+          >
+            翻译简介
+          </el-button>
+        </div>
       </div>
       <el-descriptions :column="2" border>
         <el-descriptions-item label="原始标题">{{ selected.original_title || '-' }}</el-descriptions-item>
@@ -629,6 +661,12 @@ onBeforeUnmount(() => bulkRenameEvents?.close())
       type="success"
       :closable="false"
       title="NFO、主图和剧集图片均已齐全，无需写入"
+    />
+    <el-alert
+      v-if="bulkArtifactPreview?.auto_translate_description && bulkArtifactPreview?.translation_candidate_count"
+      type="info"
+      :closable="false"
+      :title="`执行时将先自动翻译 ${bulkArtifactPreview.translation_candidate_count} 部作品简介，再重新生成 NFO 内容`"
     />
     <div v-if="bulkArtifactRunning || bulkArtifactTaskText" class="bulk-match-progress">
       <el-progress

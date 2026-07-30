@@ -5,11 +5,17 @@ import shutil
 import subprocess
 import tempfile
 from pathlib import Path
+from typing import Any
 from urllib.parse import urlparse
 
 import httpx
 from sqlalchemy.orm import Session
 
+from .description_translation import (
+    auto_translate_anime_description,
+    auto_translation_enabled,
+    description_needs_translation,
+)
 from .errors import AppError
 from .exporter import _atomic_write, _episode_nfo, _movie_nfo, _show_nfo
 from .models import Anime, MediaFile, TaskRecord
@@ -142,6 +148,9 @@ def build_bulk_artifact_plan(animes: list[Anime]) -> dict:
             for item in entries
         ],
         "_entries": entries,
+        "_nfo_anime_ids": sorted(
+            {item["anime_id"] for item in entries if item["kind"].endswith("_nfo")}
+        ),
     }
 
 
@@ -213,7 +222,7 @@ def _download_poster(source: str, target: Path) -> None:
     _atomic_write(target, response.content, overwrite=False)
 
 
-def execute_bulk_artifact_plan(
+async def execute_bulk_artifact_plan(
     db: Session,
     animes: list[Anime],
     task: TaskRecord,
@@ -227,8 +236,41 @@ def execute_bulk_artifact_plan(
                 details=plan["blockers"],
                 status_code=409,
             )
-        entries = plan["_entries"]
         task.status = "running"
+        task.message = "正在准备批量写入"
+        db.commit()
+
+        translated_anime_ids: list[int] = []
+        translation_failures: list[dict[str, Any]] = []
+        nfo_anime_ids = (
+            [
+                anime_id
+                for anime_id in plan["_nfo_anime_ids"]
+                if (anime := db.get(Anime, anime_id))
+                and description_needs_translation(anime)
+            ]
+            if auto_translation_enabled(db)
+            else []
+        )
+        total_steps = len(nfo_anime_ids) + len(plan["_entries"])
+        for index, anime_id in enumerate(nfo_anime_ids, start=1):
+            anime = db.get(Anime, anime_id)
+            if anime:
+                result = await auto_translate_anime_description(db, anime)
+                if result["status"] == "translated":
+                    translated_anime_ids.append(anime_id)
+                elif result["status"] == "failed":
+                    translation_failures.append(
+                        {"anime_id": anime_id, "anime_title": anime.title, **result}
+                    )
+            task.progress = index / max(total_steps, 1)
+            task.message = f"正在翻译简介 {index}/{len(nfo_anime_ids)}"
+            db.commit()
+
+        # 简介可能已更新，重新生成 NFO XML，避免写入预览阶段的旧内容。
+        plan = build_bulk_artifact_plan(animes)
+        entries = plan["_entries"]
+        total_steps = len(nfo_anime_ids) + len(entries)
         task.message = "正在写入 NFO、主图和剧集图片"
         db.commit()
 
@@ -264,7 +306,7 @@ def execute_bulk_artifact_plan(
                     media.has_episode_image = True
             except Exception as exc:
                 failures.append({"path": str(target), "message": str(exc)})
-            task.progress = index / max(len(entries), 1)
+            task.progress = (len(nfo_anime_ids) + index) / max(total_steps, 1)
             task.message = f"正在处理 {index}/{len(entries)}"
             db.commit()
 
@@ -276,6 +318,8 @@ def execute_bulk_artifact_plan(
             "written": written,
             "existing": existing,
             "failed": failures,
+            "translated_anime_ids": translated_anime_ids,
+            "translation_failed": translation_failures,
             "skipped": plan["skipped"],
         }
         db.commit()

@@ -17,6 +17,15 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "proxy_url": "",
     "request_interval_seconds": 2.1,
     "scheduled_refresh": False,
+    "auto_translate_description": False,
+    "translation_provider": "openai",
+    "translation_base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+    "translation_api_key": "",
+    "translation_model": "qwen-max",
+    "translation_timeout_seconds": 60,
+    "tmt_secret_id": "",
+    "tmt_secret_key": "",
+    "tmt_region": "ap-guangzhou",
 }
 
 

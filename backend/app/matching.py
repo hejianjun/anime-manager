@@ -5,6 +5,7 @@ from dataclasses import asdict
 from sqlalchemy import delete, select, tuple_
 from sqlalchemy.orm import Session
 
+from .description_translation import auto_translate_anime_description
 from .errors import AppError
 from .models import (
     Anime,
@@ -248,6 +249,24 @@ def _bind_group_files(
             media.match_group_id = None
 
 
+async def _record_auto_translation(db: Session, anime: Anime) -> None:
+    result = await auto_translate_anime_description(db, anime)
+    if result["status"] not in {"translated", "failed"}:
+        return
+    db.add(
+        ScrapeHistory(
+            anime_id=anime.id,
+            source="translation",
+            success=result["status"] == "translated",
+            message=(
+                "简介已自动翻译为简体中文"
+                if result["status"] == "translated"
+                else f"{result.get('code')}: {result.get('message')}"
+            ),
+        )
+    )
+
+
 async def confirm_group(
     db: Session,
     group: MatchGroup,
@@ -263,6 +282,7 @@ async def confirm_group(
     try:
         await _bind_candidate_sources(db, anime, selected)
         _bind_group_files(group, anime, files)
+        await _record_auto_translation(db, anime)
         db.commit()
         db.refresh(anime)
         return anime
@@ -297,6 +317,7 @@ async def refresh_anime(
                     message=f"{exc.code}: {exc.message}",
                 )
             )
+    await _record_auto_translation(db, anime)
     db.commit()
     db.refresh(anime)
     return anime

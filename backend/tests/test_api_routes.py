@@ -26,6 +26,7 @@ EXPECTED_OPERATIONS = {
     ("GET", "/api/anime/{anime_id}"),
     ("PATCH", "/api/anime/{anime_id}"),
     ("POST", "/api/anime/{anime_id}/refresh"),
+    ("POST", "/api/anime/{anime_id}/translate-description"),
     ("DELETE", "/api/anime/{anime_id}/media-files/{media_id}"),
     ("POST", "/api/anime/{anime_id}/rename-preview"),
     ("POST", "/api/anime/{anime_id}/rename"),

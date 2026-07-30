@@ -202,6 +202,15 @@ class SettingsPatch(BaseModel):
     proxy_url: str | None = None
     request_interval_seconds: float | None = Field(default=None, ge=2)
     scheduled_refresh: bool | None = None
+    auto_translate_description: bool | None = None
+    translation_provider: Literal["openai", "tmt"] | None = None
+    translation_base_url: str | None = None
+    translation_api_key: str | None = None
+    translation_model: str | None = None
+    translation_timeout_seconds: float | None = Field(default=None, ge=1, le=300)
+    tmt_secret_id: str | None = None
+    tmt_secret_key: str | None = None
+    tmt_region: str | None = None
 
 
 # overwrite 为真时允许覆盖已有输出，但业务层仍会先创建备份。

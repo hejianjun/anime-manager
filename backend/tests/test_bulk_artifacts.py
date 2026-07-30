@@ -5,7 +5,7 @@ from sqlalchemy.orm import Session
 
 from app.bulk_artifacts import build_bulk_artifact_plan, execute_bulk_artifact_plan
 from app.database import Base
-from app.models import Anime, LibraryRoot, MediaFile, TaskRecord
+from app.models import Anime, AppSetting, LibraryRoot, MediaFile, TaskRecord
 
 
 def add_media(
@@ -69,7 +69,7 @@ def test_bulk_artifact_plan_only_contains_missing_outputs(tmp_path: Path) -> Non
         assert media.has_nfo is False
 
 
-def test_bulk_artifact_execution_writes_and_updates_health(
+async def test_bulk_artifact_execution_writes_and_updates_health(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -99,7 +99,7 @@ def test_bulk_artifact_execution_writes_and_updates_health(
         monkeypatch.setattr("app.bulk_artifacts._download_poster", fake_download)
         monkeypatch.setattr("app.bulk_artifacts.shutil.which", lambda _name: "ffmpeg")
 
-        execute_bulk_artifact_plan(db, [anime], task)
+        await execute_bulk_artifact_plan(db, [anime], task)
 
         assert task.status == "completed"
         assert len(task.result["written"]) == 4
@@ -136,3 +136,106 @@ def test_bulk_artifact_plan_does_not_overwrite_existing_poster(tmp_path: Path) -
         assert plan["poster_count"] == 0
         assert plan["files"] == []
         assert (tmp_path / "poster.jpg").read_bytes() == b"existing"
+
+
+async def test_bulk_artifact_auto_translates_before_writing_nfo(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+
+    async def fake_translate(_db, description: str) -> str:
+        assert description == "作品の紹介です。"
+        return "这是作品简介。"
+
+    monkeypatch.setattr(
+        "app.description_translation.translate_description_text",
+        fake_translate,
+    )
+    monkeypatch.setattr("app.bulk_artifacts.shutil.which", lambda _name: "ffmpeg")
+    monkeypatch.setattr(
+        "app.bulk_artifacts._extract_episode_image",
+        lambda _source, target, _seek: target.write_bytes(b"jpg"),
+    )
+
+    with Session(engine) as db:
+        root = LibraryRoot(path=str(tmp_path))
+        anime = Anime(
+            title="Example",
+            description="作品の紹介です。",
+            field_provenance={"description": "getchu"},
+            media_type="OVA",
+            has_show_nfo=False,
+        )
+        task = TaskRecord(kind="bulk_artifacts")
+        db.add_all(
+            [
+                root,
+                anime,
+                task,
+                AppSetting(key="auto_translate_description", value=True),
+            ]
+        )
+        db.flush()
+        add_media(db, root, anime, tmp_path / "Example.mkv", 1)
+        db.commit()
+
+        await execute_bulk_artifact_plan(db, [anime], task)
+
+        assert anime.description == "这是作品简介。"
+        assert anime.field_provenance["description"] == "translation"
+        assert "description" in anime.manual_fields
+        assert task.result["translated_anime_ids"] == [anime.id]
+        assert task.result["translation_failed"] == []
+        assert "这是作品简介。" in (tmp_path / "tvshow.nfo").read_text(encoding="utf-8")
+
+
+async def test_bulk_artifact_translation_failure_keeps_writing_original_nfo(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+
+    async def fail_translate(_db, _description: str) -> str:
+        raise RuntimeError("translation unavailable")
+
+    monkeypatch.setattr(
+        "app.description_translation.translate_description_text",
+        fail_translate,
+    )
+    monkeypatch.setattr("app.bulk_artifacts.shutil.which", lambda _name: "ffmpeg")
+    monkeypatch.setattr(
+        "app.bulk_artifacts._extract_episode_image",
+        lambda _source, target, _seek: target.write_bytes(b"jpg"),
+    )
+
+    with Session(engine) as db:
+        root = LibraryRoot(path=str(tmp_path))
+        anime = Anime(
+            title="Example",
+            description="作品の紹介です。",
+            field_provenance={"description": "getchu"},
+            media_type="OVA",
+            has_show_nfo=False,
+        )
+        task = TaskRecord(kind="bulk_artifacts")
+        db.add_all(
+            [
+                root,
+                anime,
+                task,
+                AppSetting(key="auto_translate_description", value=True),
+            ]
+        )
+        db.flush()
+        add_media(db, root, anime, tmp_path / "Example.mkv", 1)
+        db.commit()
+
+        await execute_bulk_artifact_plan(db, [anime], task)
+
+        assert task.status == "completed"
+        assert task.result["translated_anime_ids"] == []
+        assert len(task.result["translation_failed"]) == 1
+        assert "作品の紹介です。" in (tmp_path / "tvshow.nfo").read_text(encoding="utf-8")
