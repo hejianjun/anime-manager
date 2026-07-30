@@ -136,6 +136,119 @@ async def test_translate_description_dispatches_to_tmt(
 
 
 @pytest.mark.asyncio
+async def test_selected_openai_takes_priority_over_configured_tmt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    called: list[str] = []
+
+    async def fake_openai(_db, description):
+        called.append(f"openai:{description}")
+        return "OpenAI 译文"
+
+    async def fail_tmt(_db, _description):
+        raise AssertionError("TMT should not be called when OpenAI succeeds")
+
+    monkeypatch.setattr(description_translation, "_translate_openai", fake_openai)
+    monkeypatch.setattr(description_translation, "_translate_tmt", fail_tmt)
+
+    with Session(engine) as db:
+        for key, value in {
+            "translation_provider": "openai",
+            "translation_base_url": "https://example.test/v1",
+            "translation_api_key": "openai-key",
+            "translation_model": "model",
+            "tmt_secret_id": "tmt-id",
+            "tmt_secret_key": "tmt-key",
+        }.items():
+            db.add(AppSetting(key=key, value=value))
+        db.commit()
+
+        result = await translate_description_text(db, "作品紹介")
+
+    assert result == "OpenAI 译文"
+    assert called == ["openai:作品紹介"]
+
+
+@pytest.mark.asyncio
+async def test_tmt_is_used_when_selected_openai_refuses(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    called: list[str] = []
+
+    async def refuse_openai(_db, description):
+        called.append(f"openai:{description}")
+        raise AppError("TRANSLATION_REFUSED", "OpenAI 拒绝翻译")
+
+    async def fake_tmt(_db, description):
+        called.append(f"tmt:{description}")
+        return "TMT 译文"
+
+    monkeypatch.setattr(description_translation, "_translate_openai", refuse_openai)
+    monkeypatch.setattr(description_translation, "_translate_tmt", fake_tmt)
+
+    with Session(engine) as db:
+        for key, value in {
+            "translation_provider": "openai",
+            "translation_base_url": "https://example.test/v1",
+            "translation_api_key": "openai-key",
+            "translation_model": "model",
+            "tmt_secret_id": "tmt-id",
+            "tmt_secret_key": "tmt-key",
+        }.items():
+            db.add(AppSetting(key=key, value=value))
+        db.commit()
+
+        result = await translate_description_text(db, "作品紹介")
+
+    assert result == "TMT 译文"
+    assert called == ["openai:作品紹介", "tmt:作品紹介"]
+
+
+@pytest.mark.asyncio
+async def test_original_description_is_kept_when_openai_and_tmt_both_fail(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+
+    async def fail_openai(_db, _description):
+        raise AppError("TRANSLATION_REQUEST_FAILED", "OpenAI 请求失败", retryable=True)
+
+    async def fail_tmt(_db, _description):
+        raise AppError("TRANSLATION_REQUEST_FAILED", "TMT 请求失败", retryable=True)
+
+    monkeypatch.setattr(description_translation, "_translate_openai", fail_openai)
+    monkeypatch.setattr(description_translation, "_translate_tmt", fail_tmt)
+
+    with Session(engine) as db:
+        for key, value in {
+            "auto_translate_description": True,
+            "translation_provider": "openai",
+            "tmt_secret_id": "tmt-id",
+            "tmt_secret_key": "tmt-key",
+        }.items():
+            db.add(AppSetting(key=key, value=value))
+        anime = Anime(
+            title="作品",
+            description="Original description",
+            field_provenance={"description": "anidb"},
+        )
+        db.add(anime)
+        db.commit()
+
+        result = await auto_translate_anime_description(db, anime)
+
+        assert result["status"] == "failed"
+        assert result["code"] == "TRANSLATION_FALLBACK_FAILED"
+        assert anime.description == "Original description"
+        assert anime.field_provenance["description"] == "anidb"
+
+
+@pytest.mark.asyncio
 async def test_translate_description_endpoint_persists_and_protects_translation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

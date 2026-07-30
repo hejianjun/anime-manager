@@ -119,7 +119,10 @@ onMounted(load)
             <el-input v-model="form.tmt_region" placeholder="例如 ap-guangzhou" />
           </el-form-item>
         </template>
-        <p class="setting-help">支持 OpenAI Chat Completions 兼容接口和腾讯云 TMT；自动识别源语言，翻译目标固定为简体中文。</p>
+        <p class="setting-help">
+          选择 OpenAI 兼容服务时，翻译顺序为 OpenAI → 已配置的腾讯云 TMT → 保留原简介；
+          OpenAI 请求失败或拒绝翻译后才会尝试 TMT。
+        </p>
         <el-button type="primary" :loading="busy" @click="save">保存设置</el-button>
       </el-form>
       <div>

@@ -70,6 +70,13 @@ def auto_translation_enabled(db: Session) -> bool:
     return bool(_setting(db, "auto_translate_description", False))
 
 
+def tmt_translation_configured(db: Session) -> bool:
+    """判断 TMT 能否作为 OpenAI 失败后的备用服务；地域缺省使用广州。"""
+    secret_id = str(_setting(db, "tmt_secret_id", "") or "").strip()
+    secret_key = str(_setting(db, "tmt_secret_key", "") or "").strip()
+    return bool(secret_id and secret_key)
+
+
 def description_needs_translation(anime: Anime) -> bool:
     """判断抓取简介是否需要自动翻译；人工或已翻译字段始终保留。"""
     description = (anime.description or "").strip()
@@ -251,10 +258,32 @@ async def _translate_tmt(db: Session, description: str) -> str:
 async def translate_description_text(db: Session, description: str) -> str:
     """使用设置页选择的 OpenAI 兼容接口或腾讯云 TMT 翻译作品简介。"""
     provider = str(_setting(db, "translation_provider", "openai") or "openai")
-    if provider == "openai":
-        translated = await _translate_openai(db, description)
-    elif provider == "tmt":
-        translated = await _translate_tmt(db, description)
-    else:
+    if provider == "tmt":
+        return _validate_translation_text(await _translate_tmt(db, description))
+    if provider != "openai":
         raise AppError("UNKNOWN_TRANSLATION_PROVIDER", f"不支持的简介翻译服务: {provider}")
-    return _validate_translation_text(translated)
+
+    try:
+        return _validate_translation_text(await _translate_openai(db, description))
+    except AppError as openai_error:
+        if not tmt_translation_configured(db):
+            raise
+        try:
+            return _validate_translation_text(await _translate_tmt(db, description))
+        except AppError as tmt_error:
+            raise AppError(
+                "TRANSLATION_FALLBACK_FAILED",
+                "OpenAI 兼容服务和腾讯云 TMT 均翻译失败，已保留原简介",
+                details={
+                    "openai": {
+                        "code": openai_error.code,
+                        "message": openai_error.message,
+                    },
+                    "tmt": {
+                        "code": tmt_error.code,
+                        "message": tmt_error.message,
+                    },
+                },
+                retryable=openai_error.retryable or tmt_error.retryable,
+                status_code=502,
+            ) from tmt_error
