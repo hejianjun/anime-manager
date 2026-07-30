@@ -1,11 +1,11 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { api, getAllAnime, type Anime, type MediaFile } from '../api'
+import { api, getAllAnime, type Anime, type DescriptionCandidate, type MediaFile } from '../api'
 import { getEpisodeHealth, hasExportBlockers, matchesAnimeSearch, missingEpisodeText } from '../utils'
 
 const items = ref<Anime[]>([])
-type IssueFilter = 'missing' | 'unfilled' | 'directory' | 'nfo' | 'episodeImage'
+type IssueFilter = 'missing' | 'unfilled' | 'description' | 'directory' | 'nfo' | 'episodeImage'
 
 const issueFilters = ref<IssueFilter[]>([])
 const searchInput = ref('')
@@ -33,9 +33,17 @@ const bulkArtifactRunning = ref(false)
 const bulkArtifactProgress = ref(0)
 const bulkArtifactTaskText = ref('')
 const coverErrors = ref<Record<number, boolean>>({})
+const coverFallbacks = ref<Record<number, string>>({})
 const playerOpen = ref(false)
 const playerFile = ref<MediaFile | null>(null)
 const removingMediaId = ref<number | null>(null)
+const descriptionSearchOpen = ref(false)
+const descriptionSearchKeyword = ref('')
+const descriptionCandidates = ref<DescriptionCandidate[]>([])
+const descriptionSearchErrors = ref<Array<{ source: string; message: string }>>([])
+const descriptionSelection = ref('')
+const descriptionSearching = ref(false)
+const descriptionFilling = ref(false)
 let bulkRenameEvents: EventSource | null = null
 const playerUrl = computed(() => playerFile.value ? `/api/media-files/${playerFile.value.id}/stream` : '')
 
@@ -50,6 +58,7 @@ const filteredItems = computed(() => {
     return issueFilters.value.some((filter) => {
       if (filter === 'missing') return health.missingEpisodes.length > 0
       if (filter === 'unfilled') return health.unfilledCount > 0
+      if (filter === 'description') return !(item.description || '').trim()
       if (filter === 'directory') return item.catalog_health.directory_name_mismatch
       if (filter === 'nfo') return item.catalog_health.missing_nfo_count > 0
       return item.catalog_health.missing_episode_image_count > 0
@@ -61,6 +70,9 @@ const missingAnimeCount = computed(() =>
 )
 const unfilledAnimeCount = computed(() =>
   items.value.filter(item => itemHealth.value[item.id].unfilledCount > 0).length,
+)
+const missingDescriptionCount = computed(() =>
+  items.value.filter(item => !(item.description || '').trim()).length,
 )
 const directoryMismatchCount = computed(() =>
   items.value.filter(item => item.catalog_health.directory_name_mismatch).length,
@@ -88,15 +100,32 @@ const artifactKindLabels: Record<string, string> = {
   episode_image: '剧集图片',
 }
 
-function markCoverError(animeId: number) {
-  coverErrors.value[animeId] = true
+function getchuCoverUrl(anime: Anime) {
+  const getchu = anime.mappings.find(item => item.source === 'getchu' && !item.is_mock)
+  return getchu ? `/api/sources/getchu/${encodeURIComponent(getchu.source_id)}/cover` : null
 }
 
 function coverUrl(anime: Anime) {
-  const getchu = anime.mappings.find(item => item.source === 'getchu' && !item.is_mock)
-  return getchu
-    ? `/api/sources/getchu/${encodeURIComponent(getchu.source_id)}/cover`
-    : anime.cover_url
+  if (coverFallbacks.value[anime.id]) return coverFallbacks.value[anime.id]
+  if (anime.field_provenance.cover_url === 'getchu') {
+    return getchuCoverUrl(anime) || anime.cover_url
+  }
+  return anime.cover_url
+}
+
+function markCoverError(anime: Anime) {
+  const failedUrl = coverUrl(anime)
+  const originalUrl = anime.cover_url
+  // Getchu 代理失败时先尝试抓取结果中的原始地址；原图也失败才显示 NO COVER。
+  if (
+    anime.field_provenance.cover_url === 'getchu'
+    && failedUrl !== originalUrl
+    && originalUrl
+  ) {
+    coverFallbacks.value[anime.id] = originalUrl
+    return
+  }
+  coverErrors.value[anime.id] = true
 }
 
 function applySearch() {
@@ -150,6 +179,57 @@ async function translateDescription() {
     ElMessage.success('简介已翻译为简体中文')
   } catch (error) { ElMessage.error((error as Error).message) }
   finally { busy.value = false }
+}
+
+async function searchDescriptionCandidates() {
+  if (!selected.value) return
+  descriptionSearching.value = true
+  descriptionSelection.value = ''
+  try {
+    const response = (await api.post(
+      `/anime/${selected.value.id}/description-candidates`,
+      null,
+      { params: { keyword: descriptionSearchKeyword.value.trim() || selected.value.title } },
+    )).data
+    descriptionCandidates.value = response.items
+    descriptionSearchErrors.value = response.errors
+  } catch (error) {
+    ElMessage.error((error as Error).message)
+  } finally {
+    descriptionSearching.value = false
+  }
+}
+
+async function openDescriptionSearch() {
+  if (!selected.value) return
+  descriptionSearchKeyword.value = selected.value.original_title || selected.value.title
+  descriptionCandidates.value = []
+  descriptionSearchErrors.value = []
+  descriptionSelection.value = ''
+  descriptionSearchOpen.value = true
+  await searchDescriptionCandidates()
+}
+
+async function fillDescription() {
+  if (!selected.value || !descriptionSelection.value) return
+  const candidate = descriptionCandidates.value.find(
+    item => `${item.source}:${item.source_id}` === descriptionSelection.value,
+  )
+  if (!candidate) return
+  descriptionFilling.value = true
+  try {
+    selected.value = (await api.post(`/anime/${selected.value.id}/fill-description`, {
+      source: candidate.source,
+      source_id: candidate.source_id,
+    })).data
+    descriptionSearchOpen.value = false
+    await load()
+    ElMessage.success('简介已补充，并保存了来源绑定')
+  } catch (error) {
+    ElMessage.error((error as Error).message)
+  } finally {
+    descriptionFilling.value = false
+  }
 }
 
 async function showPreview() {
@@ -392,6 +472,7 @@ onBeforeUnmount(() => bulkRenameEvents?.close())
       <el-checkbox-group v-model="issueFilters">
         <el-checkbox-button value="missing">缺集 {{ missingAnimeCount }}</el-checkbox-button>
         <el-checkbox-button value="unfilled">集数未填写 {{ unfilledAnimeCount }}</el-checkbox-button>
+        <el-checkbox-button value="description">缺少简介 {{ missingDescriptionCount }}</el-checkbox-button>
         <el-checkbox-button value="directory">目录名不一致 {{ directoryMismatchCount }}</el-checkbox-button>
         <el-checkbox-button value="nfo">缺少 NFO {{ missingNfoCount }}</el-checkbox-button>
         <el-checkbox-button value="episodeImage">缺少剧集图片 {{ missingEpisodeImageCount }}</el-checkbox-button>
@@ -402,12 +483,12 @@ onBeforeUnmount(() => bulkRenameEvents?.close())
       <article v-for="item in filteredItems" :key="item.id" class="anime-card" @click="show(item)">
         <div class="anime-cover">
           <img
-            v-if="item.cover_url && !coverErrors[item.id]"
+            v-if="coverUrl(item) && !coverErrors[item.id]"
             :src="coverUrl(item) || ''"
             :alt="`${item.title} 封面`"
             loading="lazy"
             referrerpolicy="no-referrer"
-            @error="markCoverError(item.id)"
+            @error="markCoverError(item)"
           >
           <span v-else>NO COVER</span>
         </div>
@@ -423,6 +504,9 @@ onBeforeUnmount(() => bulkRenameEvents?.close())
             </el-tag>
             <el-tag v-if="itemHealth[item.id].unfilledCount" type="warning">
               {{ itemHealth[item.id].unfilledCount }} 个文件未填集数
+            </el-tag>
+            <el-tag v-if="!(item.description || '').trim()" type="danger">
+              缺少简介
             </el-tag>
             <el-tag v-if="item.catalog_health.directory_name_mismatch" type="warning">
               目录名不一致
@@ -447,23 +531,31 @@ onBeforeUnmount(() => bulkRenameEvents?.close())
       <div class="anime-detail-head">
         <div class="anime-detail-cover">
           <img
-            v-if="selected.cover_url && !coverErrors[selected.id]"
+            v-if="coverUrl(selected) && !coverErrors[selected.id]"
             :src="coverUrl(selected) || ''"
             :alt="`${selected.title} 封面`"
             referrerpolicy="no-referrer"
-            @error="markCoverError(selected.id)"
+            @error="markCoverError(selected)"
           >
           <span v-else>NO COVER</span>
         </div>
         <div>
           <p class="muted">{{ selected.description || '暂无简介' }}</p>
           <el-button
-            v-if="selected.description"
+            v-if="(selected.description || '').trim()"
             size="small"
             :loading="busy"
             @click="translateDescription"
           >
             翻译简介
+          </el-button>
+          <el-button
+            v-else
+            size="small"
+            :loading="descriptionSearching"
+            @click="openDescriptionSearch"
+          >
+            从其他来源获取简介
           </el-button>
         </div>
       </div>
@@ -515,6 +607,67 @@ onBeforeUnmount(() => bulkRenameEvents?.close())
       <el-button :loading="busy" @click="refresh">刷新元数据</el-button>
       <el-button :loading="busy" @click="previewRename">批量重命名</el-button>
       <el-button type="primary" @click="showPreview">预览导出</el-button>
+    </template>
+  </el-dialog>
+
+  <el-dialog
+    v-model="descriptionSearchOpen"
+    width="min(760px, 94vw)"
+    title="从其他来源获取简介"
+    append-to-body
+  >
+    <div class="toolbar catalog-search">
+      <el-input
+        v-model="descriptionSearchKeyword"
+        placeholder="输入作品标题"
+        clearable
+        @keyup.enter="searchDescriptionCandidates"
+      />
+      <el-button type="primary" plain :loading="descriptionSearching" @click="searchDescriptionCandidates">
+        搜索
+      </el-button>
+    </div>
+    <el-alert
+      v-for="error in descriptionSearchErrors"
+      :key="error.source"
+      type="warning"
+      :closable="false"
+      :title="`${error.source}: ${error.message}`"
+      style="margin-bottom: 10px"
+    />
+    <div v-loading="descriptionSearching" class="source-section">
+      <label
+        v-for="item in descriptionCandidates"
+        :key="`${item.source}:${item.source_id}`"
+        class="candidate"
+        :class="{ selected: descriptionSelection === `${item.source}:${item.source_id}` }"
+      >
+        <input
+          v-model="descriptionSelection"
+          type="radio"
+          name="description-candidate"
+          :value="`${item.source}:${item.source_id}`"
+        >
+        <span>
+          <b>{{ item.title }}</b>
+          <small class="muted"> · {{ item.source }}:{{ item.source_id }}</small>
+        </span>
+        <span class="muted">{{ item.year || '-' }} · 匹配 {{ Math.round(item.score * 100) }}%</span>
+      </label>
+      <div v-if="!descriptionSearching && !descriptionCandidates.length" class="empty">
+        其他已启用来源没有返回候选；可修改关键词后重试
+      </div>
+    </div>
+    <template #footer>
+      <el-button @click="descriptionSearchOpen = false">取消</el-button>
+      <el-button
+        type="primary"
+        :disabled="!descriptionSelection"
+        :loading="descriptionFilling"
+        @click="fillDescription"
+      >
+        使用所选简介
+      </el-button>
     </template>
   </el-dialog>
 

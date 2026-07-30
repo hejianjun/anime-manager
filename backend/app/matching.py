@@ -18,6 +18,8 @@ from .models import (
 )
 from .scrapers import SCRAPERS, Candidate, SourceMetadata
 
+DESCRIPTION_SOURCES = {"anidb", "getchu"}
+
 
 def _selected_group_files(
     group: MatchGroup, file_ids: list[int] | None
@@ -321,3 +323,101 @@ async def refresh_anime(
     db.commit()
     db.refresh(anime)
     return anime
+
+
+async def search_description_candidates(
+    db: Session,
+    anime: Anime,
+    keyword: str,
+    enabled_sources: list[str],
+) -> tuple[list[Candidate], list[dict]]:
+    """搜索尚未绑定且能够提供简介的数据源，结果交由用户确认。"""
+    bound_sources = {mapping.source for mapping in anime.mappings}
+    sources = [
+        source
+        for source in enabled_sources
+        if source in DESCRIPTION_SOURCES and source not in bound_sources
+    ]
+    results: list[Candidate] = []
+    errors: list[dict] = []
+    for source in sources:
+        try:
+            results.extend(await SCRAPERS[source].search(db, keyword))
+        except AppError as exc:
+            errors.append(
+                {
+                    "source": source,
+                    "code": exc.code,
+                    "message": exc.message,
+                    "details": exc.details,
+                }
+            )
+    return results, errors
+
+
+async def fill_missing_description(
+    db: Session,
+    anime: Anime,
+    source: str,
+    source_id: str,
+    enabled_sources: list[str],
+) -> Anime:
+    """由人工确认的其他来源仅补写缺失简介，并保存来源映射供后续刷新。"""
+    if (anime.description or "").strip():
+        raise AppError("DESCRIPTION_EXISTS", "当前作品已有简介，不会自动覆盖", status_code=409)
+    if source not in SCRAPERS or source not in DESCRIPTION_SOURCES:
+        raise AppError("UNKNOWN_SOURCE", f"该数据源不支持补抓简介: {source}")
+    if source not in enabled_sources:
+        raise AppError("SOURCE_DISABLED", "该数据源已在设置中停用", status_code=409)
+    if any(mapping.source == source for mapping in anime.mappings):
+        raise AppError("SOURCE_ALREADY_BOUND", "该数据源已绑定，请直接刷新元数据", status_code=409)
+
+    existing = db.scalar(
+        select(SourceMapping).where(
+            SourceMapping.source == source,
+            SourceMapping.source_id == source_id,
+        )
+    )
+    if existing and existing.anime_id != anime.id:
+        raise AppError(
+            "SOURCE_ALREADY_USED",
+            "选择的来源条目已绑定到其他作品",
+            status_code=409,
+        )
+
+    try:
+        metadata = await SCRAPERS[source].detail(db, source_id)
+        description = (metadata.description or "").strip()
+        if metadata.is_mock or not description:
+            raise AppError(
+                "SOURCE_DESCRIPTION_EMPTY",
+                "所选来源条目没有可用简介，请选择其他候选",
+                status_code=409,
+            )
+        db.add(
+            SourceMapping(
+                anime_id=anime.id,
+                source=source,
+                source_id=source_id,
+                is_mock=False,
+            )
+        )
+        anime.description = description
+        provenance = dict(anime.field_provenance or {})
+        provenance["description"] = source
+        anime.field_provenance = provenance
+        db.add(
+            ScrapeHistory(
+                anime_id=anime.id,
+                source=source,
+                success=True,
+                message="人工确认候选并补充简介",
+            )
+        )
+        await _record_auto_translation(db, anime)
+        db.commit()
+        db.refresh(anime)
+        return anime
+    except Exception:
+        db.rollback()
+        raise

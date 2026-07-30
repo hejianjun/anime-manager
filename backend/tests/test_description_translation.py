@@ -5,7 +5,12 @@ from sqlalchemy.orm import Session
 
 from app import description_translation
 from app.database import Base
-from app.description_translation import _response_text, translate_description_text
+from app.description_translation import (
+    _response_text,
+    _validate_translation_text,
+    auto_translate_anime_description,
+    translate_description_text,
+)
 from app.errors import AppError
 from app.models import Anime, AppSetting
 from app.routers import anime as anime_router
@@ -24,6 +29,22 @@ def test_response_text_rejects_invalid_payload() -> None:
         _response_text({"choices": []})
 
     assert caught.value.code == "TRANSLATION_INVALID_RESPONSE"
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "抱歉，我无法翻译涉及可能未成年角色的露骨性描写内容。",
+        "对不起，不能协助翻译该内容。",
+        "Sorry, I can't translate this content.",
+        "I am unable to help translate this content.",
+    ],
+)
+def test_translation_refusal_is_not_accepted_as_description(text: str) -> None:
+    with pytest.raises(AppError) as caught:
+        _validate_translation_text(text)
+
+    assert caught.value.code == "TRANSLATION_REFUSED"
 
 
 @pytest.mark.asyncio
@@ -138,3 +159,38 @@ async def test_translate_description_endpoint_persists_and_protects_translation(
         assert result.description == "中文简介"
         assert "description" in result.manual_fields
         assert result.field_provenance["description"] == "translation"
+
+
+@pytest.mark.asyncio
+async def test_refused_auto_translation_preserves_original_description(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+
+    async def refuse_translation(_db, _description):
+        raise AppError("TRANSLATION_REFUSED", "翻译服务拒绝了该内容")
+
+    monkeypatch.setattr(
+        description_translation,
+        "translate_description_text",
+        refuse_translation,
+    )
+
+    with Session(engine) as db:
+        db.add(AppSetting(key="auto_translate_description", value=True))
+        anime = Anime(
+            title="作品",
+            description="Original description",
+            field_provenance={"description": "anidb"},
+        )
+        db.add(anime)
+        db.commit()
+
+        result = await auto_translate_anime_description(db, anime)
+
+        assert result["status"] == "failed"
+        assert result["code"] == "TRANSLATION_REFUSED"
+        assert anime.description == "Original description"
+        assert anime.field_provenance["description"] == "anidb"
+        assert "description" not in anime.manual_fields

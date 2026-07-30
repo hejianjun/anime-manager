@@ -12,7 +12,11 @@ from ..description_translation import (
 )
 from ..errors import AppError
 from ..exporter import build_export_plan, export_anime, public_export_plan
-from ..matching import refresh_anime
+from ..matching import (
+    fill_missing_description,
+    refresh_anime,
+    search_description_candidates,
+)
 from ..media_ops import build_rename_plan, execute_rename_plan, unbind_media_from_anime
 from ..models import Anime, MediaFile, TaskRecord
 from ..queries import anime_query
@@ -20,6 +24,8 @@ from ..schemas import (
     AnimeOut,
     AnimePatch,
     BulkRenameExecuteRequest,
+    DescriptionCandidateOut,
+    DescriptionFillRequest,
     ExportRequest,
     RenameRequest,
     TaskOut,
@@ -94,6 +100,57 @@ async def refresh(anime_id: int, db: Session = Depends(get_db)):
     if not anime:
         raise AppError("NOT_FOUND", "作品不存在", status_code=404)
     return await refresh_anime(db, anime, enabled_scraper_names(db))
+
+
+@router.post("/{anime_id}/description-candidates")
+async def description_candidates(
+    anime_id: int,
+    keyword: str | None = Query(default=None, min_length=1, max_length=500),
+    db: Session = Depends(get_db),
+):
+    anime = db.scalar(anime_query().where(Anime.id == anime_id))
+    if not anime:
+        raise AppError("NOT_FOUND", "作品不存在", status_code=404)
+    if (anime.description or "").strip():
+        raise AppError("DESCRIPTION_EXISTS", "当前作品已有简介", status_code=409)
+    results, errors = await search_description_candidates(
+        db,
+        anime,
+        (keyword or anime.original_title or anime.title).strip(),
+        enabled_scraper_names(db),
+    )
+    return {
+        "items": [
+            DescriptionCandidateOut(
+                source=item.source,
+                source_id=item.source_id,
+                title=item.title,
+                year=item.year,
+                cover_url=item.cover_url,
+                score=item.score,
+            ).model_dump(mode="json")
+            for item in results
+        ],
+        "errors": errors,
+    }
+
+
+@router.post("/{anime_id}/fill-description", response_model=AnimeOut)
+async def fill_description(
+    anime_id: int,
+    payload: DescriptionFillRequest,
+    db: Session = Depends(get_db),
+):
+    anime = db.scalar(anime_query().where(Anime.id == anime_id))
+    if not anime:
+        raise AppError("NOT_FOUND", "作品不存在", status_code=404)
+    return await fill_missing_description(
+        db,
+        anime,
+        payload.source,
+        payload.source_id,
+        enabled_scraper_names(db),
+    )
 
 
 @router.post("/{anime_id}/translate-description", response_model=AnimeOut)

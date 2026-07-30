@@ -106,6 +106,21 @@ class CandidateOut(ORMModel):
     is_mock: bool
 
 
+# 已绑定作品补抓简介时使用的临时候选，不写入待匹配分组。
+class DescriptionCandidateOut(BaseModel):
+    source: str
+    source_id: str
+    title: str
+    year: int | None
+    cover_url: str | None
+    score: float
+
+
+class DescriptionFillRequest(BaseModel):
+    source: str = Field(min_length=1, max_length=40)
+    source_id: str = Field(min_length=1, max_length=200)
+
+
 # 扫描生成的待匹配分组，包含组内文件和所有来源候选。
 class MatchGroupOut(ORMModel):
     id: int

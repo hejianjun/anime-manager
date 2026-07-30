@@ -11,6 +11,15 @@ from sqlalchemy.orm import Session
 from .errors import AppError
 from .models import Anime, AppSetting
 
+TRANSLATION_REFUSAL_PATTERNS = (
+    re.compile(r"^\s*(?:抱歉|对不起)[，,。\s]*(?:我)?(?:无法|不能)(?:协助)?翻译"),
+    re.compile(
+        r"^\s*(?:sorry[,\s]+)?(?:i\s+(?:cannot|can't|am unable to)|i'm unable to)"
+        r"\s+(?:help\s+)?translate",
+        re.IGNORECASE,
+    ),
+)
+
 
 def _setting(db: Session, key: str, default: Any = None) -> Any:
     row = db.get(AppSetting, key)
@@ -40,6 +49,21 @@ def _response_text(payload: Any) -> str:
         lines = text.splitlines()
         text = "\n".join(lines[1:-1]).strip()
     return text
+
+
+def _validate_translation_text(text: str) -> str:
+    """拒绝说明不是译文，调用方收到错误后必须保留抓取到的原简介。"""
+    normalized = text.strip()
+    if len(normalized) <= 500 and any(
+        pattern.search(normalized) for pattern in TRANSLATION_REFUSAL_PATTERNS
+    ):
+        raise AppError(
+            "TRANSLATION_REFUSED",
+            "翻译服务拒绝了该内容，已保留原简介",
+            retryable=False,
+            status_code=422,
+        )
+    return normalized
 
 
 def auto_translation_enabled(db: Session) -> bool:
@@ -228,7 +252,9 @@ async def translate_description_text(db: Session, description: str) -> str:
     """使用设置页选择的 OpenAI 兼容接口或腾讯云 TMT 翻译作品简介。"""
     provider = str(_setting(db, "translation_provider", "openai") or "openai")
     if provider == "openai":
-        return await _translate_openai(db, description)
-    if provider == "tmt":
-        return await _translate_tmt(db, description)
-    raise AppError("UNKNOWN_TRANSLATION_PROVIDER", f"不支持的简介翻译服务: {provider}")
+        translated = await _translate_openai(db, description)
+    elif provider == "tmt":
+        translated = await _translate_tmt(db, description)
+    else:
+        raise AppError("UNKNOWN_TRANSLATION_PROVIDER", f"不支持的简介翻译服务: {provider}")
+    return _validate_translation_text(translated)

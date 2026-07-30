@@ -4,7 +4,12 @@ from sqlalchemy.orm import Session
 from app.database import Base
 from app.errors import AppError
 from app.main import _run_bulk_search_confirm, _task_event_stream
-from app.matching import _apply_metadata, confirm_group
+from app.matching import (
+    _apply_metadata,
+    confirm_group,
+    fill_missing_description,
+    search_description_candidates,
+)
 from app.models import (
     Anime,
     LibraryRoot,
@@ -44,6 +49,28 @@ class ExactSearchStub(StubScraper):
                 score=score,
             )
         ]
+
+
+class DescriptionStub:
+    source = "getchu"
+
+    async def search(self, _db: Session, keyword: str) -> list[Candidate]:
+        return [
+            Candidate(
+                source=self.source,
+                source_id="200",
+                title=f"{keyword} 商品版",
+                score=0.95,
+            )
+        ]
+
+    async def detail(self, _db: Session, source_id: str) -> SourceMetadata:
+        return SourceMetadata(
+            source=self.source,
+            source_id=source_id,
+            title="商品标题",
+            description="作品の紹介文です。",
+        )
 
 
 def test_getchu_only_supplements_anidb_metadata() -> None:
@@ -98,6 +125,59 @@ def test_getchu_only_supplements_anidb_metadata() -> None:
         "episode_titles": "anidb",
         "genres": "anidb",
     }
+
+
+async def test_search_and_fill_missing_description_from_other_source(monkeypatch) -> None:
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    monkeypatch.setitem(SCRAPERS, "getchu", DescriptionStub())
+
+    with Session(engine) as db:
+        anime = Anime(title="作品", field_provenance={"title": "anidb"})
+        db.add(anime)
+        db.flush()
+        db.add(SourceMapping(anime_id=anime.id, source="anidb", source_id="100"))
+        db.commit()
+
+        candidates, errors = await search_description_candidates(
+            db, anime, "作品", ["anidb", "getchu"]
+        )
+
+        assert errors == []
+        assert [(item.source, item.source_id) for item in candidates] == [("getchu", "200")]
+
+        result = await fill_missing_description(
+            db, anime, "getchu", "200", ["anidb", "getchu"]
+        )
+
+        assert result.description == "作品の紹介文です。"
+        assert result.title == "作品"
+        assert result.field_provenance == {
+            "title": "anidb",
+            "description": "getchu",
+        }
+        assert {(item.source, item.source_id) for item in result.mappings} == {
+            ("anidb", "100"),
+            ("getchu", "200"),
+        }
+
+
+async def test_fill_description_does_not_overwrite_existing_text(monkeypatch) -> None:
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    monkeypatch.setitem(SCRAPERS, "getchu", DescriptionStub())
+
+    with Session(engine) as db:
+        anime = Anime(title="作品", description="已有简介")
+        db.add(anime)
+        db.commit()
+
+        try:
+            await fill_missing_description(db, anime, "getchu", "200", ["getchu"])
+        except AppError as exc:
+            assert exc.code == "DESCRIPTION_EXISTS"
+        else:
+            raise AssertionError("existing description should not be overwritten")
 
 
 async def test_bulk_search_confirms_only_exact_matches(monkeypatch) -> None:

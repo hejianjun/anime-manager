@@ -37,6 +37,15 @@ export interface Candidate {
   is_mock: boolean
 }
 
+export interface DescriptionCandidate {
+  source: string
+  source_id: string
+  title: string
+  year: number | null
+  cover_url: string | null
+  score: number
+}
+
 export interface MatchGroup {
   id: number
   display_title: string
