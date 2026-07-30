@@ -8,7 +8,7 @@ class Settings(BaseSettings):
     database_url: str = "sqlite:///./data/anime.db"
     cache_dir: Path = Path("./data/cache")
     host: str = "127.0.0.1"
-    port: int = 10910
+    port: int = 18010
     frontend_origin: str = "http://127.0.0.1:5173"
     demo_scrapers: bool = True
 
