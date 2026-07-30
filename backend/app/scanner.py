@@ -133,6 +133,30 @@ def pending_group_for_path(
         )
     )
     if group:
+        if group.status != "pending" or group.anime_id is not None:
+            pending_key = f"{group_key}::pending"
+            pending = db.scalar(
+                select(MatchGroup).where(
+                    MatchGroup.library_root_id == root.id,
+                    MatchGroup.group_key == pending_key,
+                )
+            )
+            previous = existing.match_group if existing else None
+            if pending:
+                group = pending
+            elif previous and previous.status == "pending" and previous.anime_id is None:
+                previous.group_key = pending_key
+                group = previous
+            else:
+                title = directory_display_title(path, root_path, parsed_title)
+                group = MatchGroup(
+                    library_root_id=root.id,
+                    group_key=pending_key,
+                    display_title=title,
+                    search_keyword=directory_search_keyword(path, root_path, title),
+                )
+                db.add(group)
+                db.flush()
         title = directory_display_title(path, root_path, parsed_title)
         if group.search_keyword == group.display_title:
             group.search_keyword = directory_search_keyword(path, root_path, title)

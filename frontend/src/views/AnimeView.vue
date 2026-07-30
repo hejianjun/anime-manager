@@ -35,6 +35,7 @@ const bulkArtifactTaskText = ref('')
 const coverErrors = ref<Record<number, boolean>>({})
 const playerOpen = ref(false)
 const playerFile = ref<MediaFile | null>(null)
+const removingMediaId = ref<number | null>(null)
 let bulkRenameEvents: EventSource | null = null
 const playerUrl = computed(() => playerFile.value ? `/api/media-files/${playerFile.value.id}/stream` : '')
 
@@ -158,6 +159,34 @@ async function saveEpisode(file: any) {
     await api.patch(`/media-files/${file.id}`, { episode: file.episode })
     ElMessage.success('集号已保存')
   } catch (error) { ElMessage.error((error as Error).message) }
+}
+
+async function removeMedia(file: MediaFile) {
+  if (!selected.value) return
+  try {
+    await ElMessageBox.confirm(
+      `确定将“${file.relative_path}”从当前作品中移除吗？磁盘上的物理文件不会被删除，移除后会回到待确认列表。`,
+      '从作品中删除',
+      {
+        type: 'warning',
+        confirmButtonText: '确认移除',
+        cancelButtonText: '取消',
+      },
+    )
+  } catch {
+    return
+  }
+  removingMediaId.value = file.id
+  try {
+    await api.delete(`/anime/${selected.value.id}/media-files/${file.id}`)
+    selected.value = (await api.get(`/anime/${selected.value.id}`)).data
+    await load()
+    ElMessage.success('已从作品中移除，物理文件未删除')
+  } catch (error) {
+    ElMessage.error((error as Error).message)
+  } finally {
+    removingMediaId.value = null
+  }
 }
 
 async function previewRename() {
@@ -422,9 +451,19 @@ onBeforeUnmount(() => bulkRenameEvents?.close())
           <template #default="{ row }">{{ selected.episode_titles[String(row.episode)] || '-' }}</template>
         </el-table-column>
         <el-table-column prop="status" label="状态" width="90" />
-        <el-table-column label="操作" width="80" fixed="right">
+        <el-table-column label="操作" width="150" fixed="right">
           <template #default="{ row }">
             <el-button size="small" @click="playMedia(row)">播放</el-button>
+            <el-button
+              size="small"
+              type="danger"
+              plain
+              :loading="removingMediaId === row.id"
+              :disabled="removingMediaId !== null && removingMediaId !== row.id"
+              @click="removeMedia(row)"
+            >
+              删除
+            </el-button>
           </template>
         </el-table-column>
       </el-table>

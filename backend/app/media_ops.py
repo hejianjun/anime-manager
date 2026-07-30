@@ -11,8 +11,9 @@ from typing import Callable
 from sqlalchemy.orm import Session
 
 from .errors import AppError
-from .models import Anime, MatchGroup, MediaFile
+from .models import Anime, MatchGroup, MediaFile, ScrapeHistory
 from .parser import parse_filename
+from .scanner import pending_group_for_path
 
 
 # Windows 文件名限制和应用约定的旧目录归档位置。
@@ -234,6 +235,39 @@ def bind_group_to_anime(
     db.commit()
     db.refresh(anime)
     return anime
+
+
+def unbind_media_from_anime(
+    db: Session,
+    anime: Anime,
+    media: MediaFile,
+) -> MediaFile:
+    """解除单个媒体文件的作品绑定，但保留物理文件和扫描信息。"""
+    if media.anime_id != anime.id:
+        raise AppError("MEDIA_NOT_IN_ANIME", "媒体文件不属于当前作品", status_code=409)
+    path = Path(media.path)
+    root_path = Path(media.library_root.path).resolve()
+    group = pending_group_for_path(
+        db,
+        media.library_root,
+        root_path,
+        path,
+        media.parsed_title,
+        media,
+    )
+    media.anime_id = None
+    media.match_group_id = group.id
+    db.add(
+        ScrapeHistory(
+            anime_id=anime.id,
+            source="manual",
+            success=True,
+            message=f"从作品中移除媒体文件: {media.relative_path}",
+        )
+    )
+    db.commit()
+    db.refresh(media)
+    return media
 
 
 @dataclass(frozen=True)

@@ -1,14 +1,14 @@
 from fastapi import APIRouter, BackgroundTasks, Depends, Query
 from sqlalchemy import func, select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, selectinload
 
 from ..bulk_artifacts import build_bulk_artifact_plan, execute_bulk_artifact_plan
 from ..database import SessionLocal, get_db
 from ..errors import AppError
 from ..exporter import build_export_plan, export_anime, public_export_plan
 from ..matching import refresh_anime
-from ..media_ops import build_rename_plan, execute_rename_plan
-from ..models import Anime, TaskRecord
+from ..media_ops import build_rename_plan, execute_rename_plan, unbind_media_from_anime
+from ..models import Anime, MediaFile, TaskRecord
 from ..queries import anime_query
 from ..schemas import (
     AnimeOut,
@@ -88,6 +88,31 @@ async def refresh(anime_id: int, db: Session = Depends(get_db)):
     if not anime:
         raise AppError("NOT_FOUND", "作品不存在", status_code=404)
     return await refresh_anime(db, anime, enabled_scraper_names(db))
+
+
+@router.delete("/{anime_id}/media-files/{media_id}", response_model=dict)
+def remove_media_file(
+    anime_id: int,
+    media_id: int,
+    db: Session = Depends(get_db),
+):
+    anime = db.get(Anime, anime_id)
+    if not anime:
+        raise AppError("NOT_FOUND", "作品不存在", status_code=404)
+    media = db.scalar(
+        select(MediaFile)
+        .options(selectinload(MediaFile.library_root))
+        .where(MediaFile.id == media_id)
+    )
+    if not media:
+        raise AppError("NOT_FOUND", "媒体文件不存在", status_code=404)
+    unbind_media_from_anime(db, anime, media)
+    return {
+        "id": media.id,
+        "anime_id": None,
+        "match_group_id": media.match_group_id,
+        "physical_file_deleted": False,
+    }
 
 
 @router.post("/{anime_id}/rename-preview")

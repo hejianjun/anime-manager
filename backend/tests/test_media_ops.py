@@ -13,8 +13,10 @@ from app.media_ops import (
     execute_cached_bulk_rename_plan,
     execute_bulk_rename_plan,
     execute_rename_plan,
+    unbind_media_from_anime,
 )
-from app.models import Anime, LibraryRoot, MatchGroup, MediaFile
+from app.models import Anime, LibraryRoot, MatchGroup, MediaFile, ScrapeHistory, TaskRecord
+from app.scanner import scan_library
 
 
 def add_media(db: Session, root: LibraryRoot, path: Path, episode: int, group: MatchGroup | None = None) -> MediaFile:
@@ -53,6 +55,61 @@ def test_bind_group_adds_files_to_existing_anime(tmp_path: Path) -> None:
         assert media.anime_id == anime.id
         assert group.status == "confirmed"
         assert db.query(Anime).count() == 1
+
+
+def test_unbind_media_keeps_file_and_returns_it_to_pending(tmp_path: Path) -> None:
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        series = tmp_path / "Example"
+        series.mkdir()
+        first_path = series / "Example E01.mp4"
+        second_path = series / "Example E02.mp4"
+        first_path.write_bytes(b"first")
+        second_path.write_bytes(b"second")
+        root = LibraryRoot(path=str(tmp_path))
+        anime = Anime(title="Example")
+        db.add_all([root, anime])
+        db.flush()
+        confirmed_group = MatchGroup(
+            library_root_id=root.id,
+            group_key=f"directory::{str(series.resolve()).casefold()}",
+            display_title="Example",
+            search_keyword="Example",
+            status="confirmed",
+            anime_id=anime.id,
+        )
+        db.add(confirmed_group)
+        db.flush()
+        first = add_media(db, root, first_path, 1, confirmed_group)
+        second = add_media(db, root, second_path, 2, confirmed_group)
+        first.anime_id = anime.id
+        second.anime_id = anime.id
+        db.commit()
+
+        unbind_media_from_anime(db, anime, first)
+
+        assert first.anime_id is None
+        assert first.match_group.status == "pending"
+        assert first.match_group.anime_id is None
+        assert first.match_group_id != confirmed_group.id
+        assert second.anime_id == anime.id
+        assert second.match_group_id == confirmed_group.id
+        assert first_path.read_bytes() == b"first"
+        history = db.query(ScrapeHistory).one()
+        assert history.anime_id == anime.id
+        assert "Example E01.mp4" in history.message
+        pending_group_id = first.match_group_id
+        task = TaskRecord(kind="scan_library")
+        db.add(task)
+        db.commit()
+
+        scan_library(db, root.id, task.id)
+
+        assert first.anime_id is None
+        assert first.match_group_id == pending_group_id
+        assert first.match_group.status == "pending"
+        assert second.anime_id == anime.id
 
 
 def test_bind_group_can_add_only_selected_files_to_existing_anime(tmp_path: Path) -> None:
