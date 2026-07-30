@@ -92,7 +92,7 @@ def save_selections(db: Session, group: MatchGroup, selections: dict[str, int | 
 
 
 def _apply_metadata(anime: Anime, metadata: SourceMetadata) -> None:
-    """按人工字段优先原则合并来源元数据，并记录每个字段的来源。"""
+    """按人工字段和来源优先级合并元数据，并记录每个字段的来源。"""
     if metadata.is_mock:
         return
     values = asdict(metadata)
@@ -117,6 +117,10 @@ def _apply_metadata(anime: Anime, metadata: SourceMetadata) -> None:
             continue
         value = values.get(source_field)
         if value not in (None, "", [], {}):
+            # Getchu 的条目是 DVD、Blu-ray 或 BOX 等商品，不是稳定的作品记录。
+            # 已由 AniDB 提供的作品级字段保持不变，Getchu 只补充 AniDB 缺失的内容。
+            if metadata.source == "getchu" and provenance.get(target_field) == "anidb":
+                continue
             setattr(anime, target_field, value)
             provenance[target_field] = metadata.source
     anime.field_provenance = provenance

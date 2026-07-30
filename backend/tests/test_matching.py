@@ -4,7 +4,7 @@ from sqlalchemy.orm import Session
 from app.database import Base
 from app.errors import AppError
 from app.main import _run_bulk_search_confirm, _task_event_stream
-from app.matching import confirm_group
+from app.matching import _apply_metadata, confirm_group
 from app.models import (
     Anime,
     LibraryRoot,
@@ -44,6 +44,60 @@ class ExactSearchStub(StubScraper):
                 score=score,
             )
         ]
+
+
+def test_getchu_only_supplements_anidb_metadata() -> None:
+    anime = Anime(title="待更新")
+
+    _apply_metadata(
+        anime,
+        SourceMetadata(
+            source="anidb",
+            source_id="100",
+            title="AniDB 作品标题",
+            description=None,
+            year=None,
+            media_type="TV Series",
+            episode_count=12,
+            cover_url=None,
+            episode_titles={"1": "第一話"},
+            genres=["科幻"],
+        ),
+    )
+    _apply_metadata(
+        anime,
+        SourceMetadata(
+            source="getchu",
+            source_id="200",
+            title="AniDB 作品标题 第1巻 Blu-ray Disc",
+            description="Getchu 商品介绍",
+            year=2026,
+            media_type="BD-VIDEO",
+            episode_count=2,
+            cover_url="https://example.test/getchu.jpg",
+            episode_titles={"1": "商品内第一话"},
+            genres=["漫画原作"],
+        ),
+    )
+
+    assert anime.title == "AniDB 作品标题"
+    assert anime.media_type == "TV Series"
+    assert anime.episode_count == 12
+    assert anime.episode_titles == {"1": "第一話"}
+    assert anime.genres == ["科幻"]
+    assert anime.description == "Getchu 商品介绍"
+    assert anime.year == 2026
+    assert anime.cover_url == "https://example.test/getchu.jpg"
+    assert anime.field_provenance == {
+        "title": "anidb",
+        "description": "getchu",
+        "year": "getchu",
+        "media_type": "anidb",
+        "episode_count": "anidb",
+        "cover_url": "getchu",
+        "episode_titles": "anidb",
+        "genres": "anidb",
+    }
 
 
 async def test_bulk_search_confirms_only_exact_matches(monkeypatch) -> None:
