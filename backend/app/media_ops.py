@@ -11,6 +11,8 @@ from typing import Callable
 from sqlalchemy.orm import Session
 
 from .errors import AppError
+from .episode_numbers import episode_filename_code, episode_sort_key
+from .library_paths import configured_library_paths, containing_library_path
 from .models import Anime, MatchGroup, MediaFile, ScrapeHistory
 from .parser import parse_filename
 from .scanner import pending_group_for_path
@@ -86,7 +88,7 @@ def _remaining_sidecars(
     source_dirs: set[Path],
     target_dir: Path,
     claimed_sources: set[Path],
-    library_root: Path,
+    source_roots: tuple[Path, ...],
 ) -> list[dict]:
     """收集尚未归属单集的目录附属文件，并保留其相对目录结构。"""
     entries: list[dict] = []
@@ -94,7 +96,7 @@ def _remaining_sidecars(
         resolved_dir = source_dir.absolute()
         if (
             not resolved_dir.is_dir()
-            or not resolved_dir.is_relative_to(library_root)
+            or not any(resolved_dir.is_relative_to(root) for root in source_roots)
         ):
             continue
         for path in sorted(resolved_dir.rglob("*"), key=lambda item: str(item).casefold()):
@@ -119,6 +121,7 @@ def _cleanup_source_candidates(
     source_dirs: set[Path],
     target_dir: Path,
     library_root: Path,
+    source_roots: tuple[Path, ...],
 ) -> set[Path]:
     """筛出位于媒体库内、且不会包含目标目录的顶层源目录。"""
     deletion_dir = (library_root / DELETION_DIRECTORY_NAME).absolute()
@@ -126,8 +129,9 @@ def _cleanup_source_candidates(
         source_dir.absolute()
         for source_dir in source_dirs
         if source_dir.absolute().is_dir()
-        and source_dir.absolute().is_relative_to(library_root)
-        and source_dir.absolute() not in {library_root, target_dir, deletion_dir}
+        and any(source_dir.absolute().is_relative_to(root) for root in source_roots)
+        and source_dir.absolute()
+        not in {*source_roots, target_dir, deletion_dir}
         and not source_dir.absolute().is_relative_to(deletion_dir)
         and not target_dir.is_relative_to(source_dir.absolute())
     }
@@ -143,12 +147,18 @@ def _classify_source_directories(
     planned_sources: set[Path],
     target_dir: Path,
     library_root: Path,
+    source_roots: tuple[Path, ...],
 ) -> tuple[set[Path], list[dict]]:
     """仅把没有本作品计划外文件的目录视为作品独占目录。"""
     exclusive: set[Path] = set()
     preserved: list[dict] = []
     for source_dir in sorted(
-        _cleanup_source_candidates(source_dirs, target_dir, library_root),
+        _cleanup_source_candidates(
+            source_dirs,
+            target_dir,
+            library_root,
+            source_roots,
+        ),
         key=lambda path: str(path).casefold(),
     ):
         unexpected: list[Path] = []
@@ -182,6 +192,7 @@ def _cleanup_directory_plan(
     source_dirs: set[Path],
     target_dir: Path,
     library_root: Path,
+    source_roots: tuple[Path, ...],
 ) -> tuple[list[dict], list[str]]:
     """生成旧目录移入 .delete 的计划，并提前检查归档目标冲突。"""
     deletion_dir = (library_root / DELETION_DIRECTORY_NAME).absolute()
@@ -189,6 +200,7 @@ def _cleanup_directory_plan(
         source_dirs,
         target_dir,
         library_root,
+        source_roots,
     )
     cleanup_dirs: list[dict] = []
     blockers: list[str] = []
@@ -246,7 +258,13 @@ def unbind_media_from_anime(
     if media.anime_id != anime.id:
         raise AppError("MEDIA_NOT_IN_ANIME", "媒体文件不属于当前作品", status_code=409)
     path = Path(media.path)
-    root_path = Path(media.library_root.path).resolve()
+    root_path = containing_library_path(path, media.library_root)
+    if root_path is None:
+        raise AppError(
+            "PATH_OUTSIDE_LIBRARY",
+            "媒体文件不在主目录或扫描目录内",
+            status_code=409,
+        )
     group = pending_group_for_path(
         db,
         media.library_root,
@@ -278,6 +296,7 @@ class _RenamePlanContext:
     season: int
     present: list[MediaFile]
     library_root: Path
+    source_roots: tuple[Path, ...]
     target_dir: Path
     target_dir_exists: bool
 
@@ -309,7 +328,21 @@ def _prepare_rename_plan(anime: Anime, season: int) -> _RenamePlanContext:
             status_code=409,
         )
 
-    library_root = Path(present[0].library_root.path).absolute()
+    configured_root = present[0].library_root
+    library_root = Path(configured_root.path).absolute()
+    source_roots = configured_library_paths(configured_root)
+    outside = [
+        item.path
+        for item in present
+        if containing_library_path(Path(item.path), configured_root) is None
+    ]
+    if outside:
+        raise AppError(
+            "PATH_OUTSIDE_LIBRARY",
+            "源文件越过主目录和扫描目录边界",
+            details=outside,
+            status_code=400,
+        )
     target_dir = (library_root / _safe_name(anime.title)).absolute()
     if not target_dir.is_relative_to(library_root):
         raise AppError(
@@ -322,6 +355,7 @@ def _prepare_rename_plan(anime: Anime, season: int) -> _RenamePlanContext:
         season=season,
         present=present,
         library_root=library_root,
+        source_roots=source_roots,
         target_dir=target_dir,
         target_dir_exists=target_dir.exists(),
     )
@@ -369,7 +403,7 @@ def _episode_target(
     suffix = f" - {_safe_name(episode_title)}" if episode_title else ""
     filename = (
         f"{_safe_name(context.anime.title)}"
-        f" - S{context.season:02d}E{media.episode:02d}"
+        f" - S{context.season:02d}E{episode_filename_code(media.episode)}"
         f"{suffix}{source.suffix.lower()}"
     )
     return context.target_dir / filename, episode_title
@@ -428,7 +462,7 @@ def _add_remaining_sidecar_entries(
         source_dirs,
         context.target_dir,
         state.claimed_sidecars,
-        context.library_root,
+        context.source_roots,
     )
     for entry in entries:
         _append_rename_entry(
@@ -448,7 +482,7 @@ def build_rename_plan(anime: Anime, season: int = 1) -> dict:
     # 先登记视频和同名附属文件，再补充尚未认领的目录级附属文件。
     ordered_media = sorted(
         context.present,
-        key=lambda item: (item.episode is None, item.episode or 0, item.path),
+        key=lambda item: (*episode_sort_key(item.episode), item.path),
     )
     for media in ordered_media:
         _add_media_rename_entries(context, state, media)
@@ -461,6 +495,7 @@ def build_rename_plan(anime: Anime, season: int = 1) -> dict:
         planned_sources,
         context.target_dir,
         context.library_root,
+        context.source_roots,
     )
     _add_remaining_sidecar_entries(context, state, exclusive_dirs)
 
@@ -468,12 +503,14 @@ def build_rename_plan(anime: Anime, season: int = 1) -> dict:
         exclusive_dirs,
         context.target_dir,
         context.library_root,
+        context.source_roots,
     )
     state.blockers.extend(cleanup_blockers)
     return {
         "anime_id": anime.id,
         "season": season,
         "library_root": str(context.library_root),
+        "source_roots": [str(path) for path in context.source_roots],
         "target_dir": str(context.target_dir),
         "deletion_dir": str(context.library_root / DELETION_DIRECTORY_NAME),
         "blockers": state.blockers,
@@ -500,19 +537,20 @@ class _BulkRenamePlanState:
 
 
 def _probe_library_roots(animes: list[Anime]) -> dict[str, bool]:
-    """每个媒体库只探测一次，避免 NAS 离线时为每部作品重复等待网络超时。"""
+    """主目录和扫描目录各探测一次，避免 NAS 离线时重复等待网络超时。"""
     root_availability: dict[str, bool] = {}
     for anime in animes:
         for media in anime.files:
             if media.status != "present":
                 continue
-            root_path = media.library_root.path
-            if root_path in root_availability:
-                continue
-            try:
-                root_availability[root_path] = Path(root_path).is_dir()
-            except OSError:
-                root_availability[root_path] = False
+            for configured in configured_library_paths(media.library_root):
+                root_path = str(configured)
+                if root_path in root_availability:
+                    continue
+                try:
+                    root_availability[root_path] = configured.is_dir()
+                except OSError:
+                    root_availability[root_path] = False
     return root_availability
 
 
@@ -525,14 +563,28 @@ def _bulk_rename_skip_reason(
     if not present:
         return "没有可用媒体文件"
 
+    main_roots = {str(Path(item.library_root.path).absolute()) for item in present}
     unavailable_roots = {
-        item.library_root.path
-        for item in present
-        if not root_availability.get(item.library_root.path, False)
+        path for path in main_roots if not root_availability.get(path, False)
     }
+    outside_sources: list[str] = []
+    for item in present:
+        source_root = containing_library_path(Path(item.path), item.library_root)
+        if source_root is None:
+            outside_sources.append(item.path)
+        elif not root_availability.get(str(source_root), False):
+            unavailable_roots.add(str(source_root))
+    if outside_sources:
+        return f"文件不在主目录或扫描目录内: {'、'.join(sorted(outside_sources))}"
     if unavailable_roots:
         return f"媒体库不可访问: {'、'.join(sorted(unavailable_roots))}"
-    if not anime.catalog_health["directory_name_mismatch"]:
+    files_outside_main = any(
+        not Path(item.path).absolute().is_relative_to(
+            Path(item.library_root.path).absolute()
+        )
+        for item in present
+    )
+    if not files_outside_main and not anime.catalog_health["directory_name_mismatch"]:
         return "目录名已一致"
     return None
 
@@ -559,6 +611,7 @@ def _merge_bulk_files(
                 "anime_title": anime.title,
                 "target_dir": plan["target_dir"],
                 "library_root": plan["library_root"],
+                "source_roots": plan["source_roots"],
             }
         )
 
@@ -590,6 +643,7 @@ def _merge_bulk_cleanup_dirs(
                 "anime_id": anime.id,
                 "anime_title": anime.title,
                 "library_root": plan["library_root"],
+                "source_roots": plan["source_roots"],
             }
         )
 
@@ -785,11 +839,18 @@ def _validate_planned_file(db: Session, item: dict) -> list[str]:
     """复核预览中的单个文件，避免使用过期计划移动错误的路径。"""
     errors: list[str] = []
     root = Path(item["library_root"]).absolute()
+    source_roots = tuple(
+        Path(path).absolute()
+        for path in item.get("source_roots", [item["library_root"]])
+    )
     source = Path(item["source"]).absolute()
     target = Path(item["target"]).absolute()
 
-    # 缓存计划中的源路径和目标路径都必须仍在原媒体库内。
-    if not source.is_relative_to(root) or not target.is_relative_to(root):
+    # 源文件可以来自扫描目录，但目标始终只能写入主目录。
+    if (
+        not any(source.is_relative_to(source_root) for source_root in source_roots)
+        or not target.is_relative_to(root)
+    ):
         return [f"路径越过媒体库边界: {source} -> {target}"]
 
     try:
@@ -810,6 +871,11 @@ def _validate_planned_file(db: Session, item: dict) -> list[str]:
             or Path(media.path).absolute() != source
         ):
             errors.append(f"媒体记录已变化，请重新预览: {source}")
+        elif (
+            Path(media.library_root.path).absolute() != root
+            or containing_library_path(source, media.library_root) is None
+        ):
+            errors.append(f"媒体库目录配置已变化，请重新预览: {source}")
     return errors
 
 
@@ -819,12 +885,17 @@ def _validate_cleanup_directory(
 ) -> list[str]:
     """复核旧目录归档操作，并将目标严格限制在媒体库的 .delete 下。"""
     root = Path(item["library_root"]).absolute()
+    source_roots = tuple(
+        Path(path).absolute()
+        for path in item.get("source_roots", [item["library_root"]])
+    )
     source = Path(item["source"]).absolute()
     target = Path(item["target"]).absolute()
     deletion_root = (root / DELETION_DIRECTORY_NAME).absolute()
 
     if (
-        not source.is_relative_to(root)
+        not any(source.is_relative_to(source_root) for source_root in source_roots)
+        or source in source_roots
         or not target.is_relative_to(deletion_root)
     ):
         return [f"归档路径越过媒体库边界: {source} -> {target}"]

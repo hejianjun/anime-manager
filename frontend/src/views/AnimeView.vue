@@ -176,7 +176,9 @@ async function runExport() {
 
 async function saveEpisode(file: any) {
   try {
-    await api.patch(`/media-files/${file.id}`, { episode: file.episode })
+    const episode = file.episode?.trim().toUpperCase() || null
+    const response = await api.patch(`/media-files/${file.id}`, { episode })
+    file.episode = response.data.episode
     ElMessage.success('集号已保存')
   } catch (error) { ElMessage.error((error as Error).message) }
 }
@@ -477,7 +479,16 @@ onBeforeUnmount(() => bulkRenameEvents?.close())
       <el-table :data="selected.files" size="small">
         <el-table-column prop="relative_path" label="文件" min-width="280" show-overflow-tooltip />
         <el-table-column label="集号" width="130">
-          <template #default="{ row }"><el-input-number v-model="row.episode" :min="0" :max="9999" size="small" controls-position="right" @change="saveEpisode(row)" /></template>
+          <template #default="{ row }">
+            <el-input
+              v-model="row.episode"
+              maxlength="16"
+              clearable
+              size="small"
+              placeholder="如 1、S1"
+              @change="saveEpisode(row)"
+            />
+          </template>
         </el-table-column>
         <el-table-column label="集标题" min-width="190" show-overflow-tooltip>
           <template #default="{ row }">{{ selected.episode_titles[String(row.episode)] || '-' }}</template>

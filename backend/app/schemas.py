@@ -3,7 +3,9 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+from .episode_numbers import normalize_episode_identifier
 
 
 # 所有数据库实体响应模型的共同基类，允许直接从 SQLAlchemy 对象读取字段。
@@ -22,20 +24,24 @@ class Page(BaseModel):
 # 媒体库根目录的新增、局部更新和返回结构。
 class LibraryRootCreate(BaseModel):
     path: str
+    scan_path: str | None = None
     enabled: bool = True
 
 
 class LibraryRootPatch(BaseModel):
     path: str | None = None
+    scan_path: str | None = None
     enabled: bool | None = None
 
 
 class LibraryRootOut(ORMModel):
     id: int
     path: str
+    scan_path: str | None
     enabled: bool
     # 尚未执行过扫描时为空。
     last_scan_at: datetime | None
+    scan_last_scan_at: datetime | None
     created_at: datetime
 
 
@@ -60,7 +66,7 @@ class MediaFileOut(ORMModel):
     relative_path: str
     size: int
     parsed_title: str
-    episode: int | None
+    episode: str | None
     duration: float | None
     width: int | None
     height: int | None
@@ -70,8 +76,13 @@ class MediaFileOut(ORMModel):
 
 # 当前仅允许人工修正集号和解析出的作品标题。
 class MediaFilePatch(BaseModel):
-    episode: int | None = Field(default=None, ge=0, le=9999)
+    episode: str | None = Field(default=None, max_length=16)
     parsed_title: str | None = Field(default=None, min_length=1, max_length=500)
+
+    @field_validator("episode", mode="before")
+    @classmethod
+    def validate_episode(cls, value: object | None) -> str | None:
+        return normalize_episode_identifier(value)
 
 
 # 作品目录与 Jellyfin 输出文件的一致性检查结果。

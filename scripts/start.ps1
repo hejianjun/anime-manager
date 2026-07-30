@@ -3,6 +3,7 @@ $projectRoot = Split-Path -Parent $PSScriptRoot
 $backendRoot = Join-Path $projectRoot "backend"
 $frontendRoot = Join-Path $projectRoot "frontend"
 $pythonExe = Join-Path $backendRoot ".venv\Scripts\python.exe"
+$alembicExe = Join-Path $backendRoot ".venv\Scripts\alembic.exe"
 $viteEntry = Join-Path $frontendRoot "node_modules\vite\bin\vite.js"
 $runtimeRoot = Join-Path $projectRoot ".runtime"
 $backendPort = 18010
@@ -10,6 +11,9 @@ $frontendPort = 5173
 
 if (-not (Test-Path -LiteralPath $pythonExe)) {
     throw "Dependencies are not installed. Run .\scripts\setup.ps1 first."
+}
+if (-not (Test-Path -LiteralPath $alembicExe)) {
+    throw "Database migration tool is missing. Run .\scripts\setup.ps1 first."
 }
 if (-not (Test-Path -LiteralPath $viteEntry)) {
     throw "Frontend dependencies are not installed. Run .\scripts\setup.ps1 first."
@@ -40,6 +44,15 @@ $frontendLog = Join-Path $runtimeRoot "frontend.log"
 $frontendErrorLog = Join-Path $runtimeRoot "frontend-error.log"
 
 try {
+    Push-Location $backendRoot
+    try {
+        & $alembicExe upgrade head
+        if ($LASTEXITCODE -ne 0) { throw "Database migration failed." }
+    }
+    finally {
+        Pop-Location
+    }
+
     $backendProcess = Start-Process -FilePath $pythonExe `
         -ArgumentList "-m", "uvicorn", "app.main:app", "--host", "127.0.0.1", "--port", "$backendPort" `
         -WorkingDirectory $backendRoot -WindowStyle Hidden -RedirectStandardOutput $backendLog -RedirectStandardError $backendErrorLog -PassThru

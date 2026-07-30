@@ -41,6 +41,20 @@ def test_resolve_media_stream_path_rejects_file_outside_library(tmp_path: Path) 
     assert exc.value.code == "MEDIA_UNAVAILABLE"
 
 
+def test_resolve_media_stream_path_accepts_file_inside_scan_directory(
+    tmp_path: Path,
+) -> None:
+    library = tmp_path / "library"
+    scan_dir = tmp_path / "incoming"
+    library.mkdir()
+    scan_dir.mkdir()
+    video = scan_dir / "Example.mp4"
+    video.write_bytes(b"video")
+    root = LibraryRoot(path=str(library), scan_path=str(scan_dir))
+
+    assert _resolve_media_stream_path(media(root, video)) == video.resolve()
+
+
 def test_resolve_media_stream_path_rejects_missing_status(tmp_path: Path) -> None:
     video = tmp_path / "Example.mp4"
     video.write_bytes(b"video")

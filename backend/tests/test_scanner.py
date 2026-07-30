@@ -116,7 +116,7 @@ def test_scan_merges_pending_files_in_same_directory(tmp_path: Path, monkeypatch
             str(first.resolve()),
             str(second.resolve()),
         }
-        assert {item.episode for item in groups[0].files} == {1, 2}
+        assert {item.episode for item in groups[0].files} == {"1", "2"}
         assert db.get(TaskRecord, task.id).result["merged_groups"] == 1
         assert probed == []
 
@@ -213,3 +213,54 @@ def test_scan_records_nfo_and_episode_image_health(tmp_path: Path, monkeypatch) 
         assert scanned.has_nfo is True
         assert scanned.has_episode_image is True
         assert db.get(Anime, anime.id).has_show_nfo is True
+
+
+def test_main_and_scan_directories_are_scanned_independently(
+    tmp_path: Path, monkeypatch
+) -> None:
+    main_dir = tmp_path / "library"
+    scan_dir = tmp_path / "incoming"
+    main_dir.mkdir()
+    scan_dir.mkdir()
+    main_video = main_dir / "Main E01.mp4"
+    scan_video = scan_dir / "Incoming E01.mp4"
+    main_video.write_bytes(b"main")
+    scan_video.write_bytes(b"incoming")
+
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    monkeypatch.setattr("app.scanner.probe_media", lambda _path: ({}, None))
+
+    with Session(engine) as db:
+        root = LibraryRoot(path=str(main_dir), scan_path=str(scan_dir))
+        main_task = TaskRecord(kind="scan_library")
+        scan_task = TaskRecord(kind="scan_library")
+        db.add_all([root, main_task, scan_task])
+        db.commit()
+
+        scan_library(db, root.id, main_task.id, "main")
+        assert {item.path for item in db.query(MediaFile).all()} == {
+            str(main_video.resolve())
+        }
+
+        scan_library(db, root.id, scan_task.id, "scan")
+        files = db.query(MediaFile).all()
+        assert {item.path for item in files if item.status == "present"} == {
+            str(main_video.resolve()),
+            str(scan_video.resolve()),
+        }
+        assert root.last_scan_at is not None
+        assert root.scan_last_scan_at is not None
+        assert db.get(TaskRecord, scan_task.id).result["source"] == "scan"
+
+        scan_video.unlink()
+        rescan_task = TaskRecord(kind="scan_library")
+        db.add(rescan_task)
+        db.commit()
+        scan_library(db, root.id, rescan_task.id, "scan")
+
+        statuses = {Path(item.path).name: item.status for item in db.query(MediaFile)}
+        assert statuses == {
+            main_video.name: "present",
+            scan_video.name: "missing",
+        }

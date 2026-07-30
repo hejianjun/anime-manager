@@ -26,9 +26,12 @@ def utcnow() -> datetime:
 class LibraryRoot(Base):
     __tablename__ = "library_root"
     id: Mapped[int] = mapped_column(primary_key=True)
+    # path 是整理完成后的主目录；扫描目录中的文件重命名后也会移入这里。
     path: Mapped[str] = mapped_column(String(2048), unique=True)
+    scan_path: Mapped[str | None] = mapped_column(String(2048))
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     last_scan_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    scan_last_scan_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     files: Mapped[list[MediaFile]] = relationship(back_populates="library_root")
 
@@ -96,7 +99,8 @@ class MediaFile(Base):
     content_hash: Mapped[str | None] = mapped_column(String(64), index=True)
     hash_algorithm: Mapped[str | None] = mapped_column(String(40))
     parsed_title: Mapped[str] = mapped_column(String(500))
-    episode: Mapped[int | None] = mapped_column(Integer)
+    # 字符串同时容纳常规集号 1 和 AniDB 特别篇编号 S1、T1 等。
+    episode: Mapped[str | None] = mapped_column(String(16))
     duration: Mapped[float | None] = mapped_column(Float)
     width: Mapped[int | None] = mapped_column(Integer)
     height: Mapped[int | None] = mapped_column(Integer)

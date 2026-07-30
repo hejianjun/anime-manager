@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session, selectinload
 
 from ..database import get_db
 from ..errors import AppError
+from ..library_paths import configured_library_paths
 from ..models import MediaFile
 from ..schemas import MediaFilePatch
 
@@ -37,13 +38,17 @@ def resolve_media_stream_path(media: MediaFile) -> Path:
     if media.status != "present":
         raise AppError("MEDIA_UNAVAILABLE", "媒体文件当前不可用", status_code=404)
     try:
-        library_root = Path(media.library_root.path).resolve(strict=True)
         media_path = Path(media.path).resolve(strict=True)
-        media_path.relative_to(library_root)
+        allowed_roots = [
+            path.resolve(strict=True)
+            for path in configured_library_paths(media.library_root)
+        ]
+        if not any(media_path.is_relative_to(root) for root in allowed_roots):
+            raise ValueError
     except (OSError, ValueError):
         raise AppError(
             "MEDIA_UNAVAILABLE",
-            "媒体文件不存在或不在媒体库内",
+            "媒体文件不存在或不在主目录、扫描目录内",
             status_code=404,
         )
     if not media_path.is_file():

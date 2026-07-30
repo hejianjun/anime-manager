@@ -21,6 +21,7 @@ from ..parser import normalize_title
 from .base import Candidate, Scraper, SourceMetadata, get_setting
 
 TITLE_DUMP_URL = "https://anidb.net/api/anime-titles.xml.gz"
+EPISODE_PARSER_VERSION = 2
 DETAIL_URL = "http://api.anidb.net:9001/httpapi"
 XML_LANG = "{http://www.w3.org/XML/1998/namespace}lang"
 
@@ -73,10 +74,10 @@ def _episode_titles(root: etree._Element) -> dict[str, str]:
     result: dict[str, str] = {}
     for episode in root.findall("./episodes/episode"):
         epno = episode.find("epno")
-        if epno is None or epno.attrib.get("type", "1") != "1":
+        if epno is None:
             continue
-        number = (epno.text or "").strip()
-        if not number.isdigit():
+        number = (epno.text or "").strip().upper()
+        if not number.isalnum():
             continue
         titles = episode.findall("title")
         preferred = next(
@@ -94,7 +95,7 @@ def _episode_titles(root: etree._Element) -> dict[str, str]:
                 None,
             )
         if preferred:
-            result[str(int(number))] = preferred
+            result[str(int(number)) if number.isdigit() else number] = preferred
     return result
 
 
@@ -214,9 +215,15 @@ class AniDBScraper(Scraper):
         else:
             fetched_at = None
         cache_has_episode_titles = cached and "episode_titles" in cached.normalized_payload
+        cache_has_current_episode_parser = (
+            cached
+            and cached.raw_payload.get("episode_parser_version")
+            == EPISODE_PARSER_VERSION
+        )
         if (
             cached
             and cache_has_episode_titles
+            and cache_has_current_episode_parser
             and fetched_at
             and datetime.now(timezone.utc) - fetched_at < timedelta(days=1)
         ):
@@ -302,6 +309,7 @@ class AniDBScraper(Scraper):
             "startdate": start_date,
             "picture": picture,
             "episode_titles": metadata.episode_titles,
+            "episode_parser_version": EPISODE_PARSER_VERSION,
         }
         if cached:
             cached.raw_payload = raw

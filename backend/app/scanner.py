@@ -95,7 +95,11 @@ def directory_search_keyword(
 def migrate_pending_folder_search_keywords(db: Session) -> int:
     """Update legacy default keywords without overwriting manual search edits."""
     root_paths = {
-        root.id: str(Path(root.path).resolve()).casefold()
+        root.id: {
+            str(Path(path).resolve()).casefold()
+            for path in (root.path, root.scan_path)
+            if path
+        }
         for root in db.scalars(select(LibraryRoot)).all()
     }
     updated = 0
@@ -108,7 +112,7 @@ def migrate_pending_folder_search_keywords(db: Session) -> int:
     ).all()
     for group in groups:
         directory_path = group.group_key.removeprefix("directory::")
-        if directory_path == root_paths.get(group.library_root_id):
+        if directory_path in root_paths.get(group.library_root_id, set()):
             continue
         keyword = folder_search_keyword(group.display_title)
         if keyword != group.search_keyword:
@@ -238,18 +242,37 @@ def probe_media(path: Path) -> tuple[dict, str | None]:
         return {}, f"无法读取 {path.name} 的媒体信息: {exc}"
 
 
-def scan_library(db: Session, root_id: int, task_id: int) -> None:
+def scan_library(
+    db: Session,
+    root_id: int,
+    task_id: int,
+    source: str = "main",
+) -> None:
     task = db.get(TaskRecord, task_id)
     root = db.get(LibraryRoot, root_id)
     if not task or not root:
         return
     try:
-        root_path = Path(root.path).resolve(strict=True)
+        configured_path = root.path if source == "main" else root.scan_path
+        if source not in {"main", "scan"} or not configured_path:
+            raise AppError(
+                "SCAN_PATH_NOT_CONFIGURED",
+                "扫描来源无效或尚未配置扫描目录",
+                status_code=409,
+            )
+        root_path = Path(configured_path).resolve(strict=True)
         if not root_path.is_dir():
-            raise AppError("INVALID_LIBRARY_ROOT", "媒体库路径不是目录")
+            raise AppError("INVALID_LIBRARY_ROOT", "扫描路径不是目录")
+        source_label = "主目录" if source == "main" else "扫描目录"
         task.status = "running"
-        task.message = "正在枚举媒体文件"
-        db.query(MediaFile).filter(MediaFile.library_root_id == root.id).update({"status": "missing"})
+        task.message = f"正在枚举{source_label}媒体文件"
+        # 独立扫描只更新当前来源内的记录，避免扫描下载目录时把主目录文件标记为缺失。
+        existing_files = db.scalars(
+            select(MediaFile).where(MediaFile.library_root_id == root.id)
+        ).all()
+        for media in existing_files:
+            if Path(media.path).absolute().is_relative_to(root_path.absolute()):
+                media.status = "missing"
         db.commit()
 
         discovered_files = sorted(
@@ -317,7 +340,9 @@ def scan_library(db: Session, root_id: int, task_id: int) -> None:
                 existing.modified_ns = stat.st_mtime_ns
                 existing.content_hash = digest
                 existing.parsed_title = parsed.title
-                existing.episode = parsed.episode
+                existing.episode = (
+                    str(parsed.episode) if parsed.episode is not None else None
+                )
                 existing.has_nfo = has_nfo
                 existing.has_episode_image = has_episode_image
                 existing.status = "present"
@@ -338,7 +363,7 @@ def scan_library(db: Session, root_id: int, task_id: int) -> None:
                         content_hash=digest,
                         hash_algorithm="blake2b-256",
                         parsed_title=parsed.title,
-                        episode=parsed.episode,
+                        episode=str(parsed.episode) if parsed.episode is not None else None,
                         has_nfo=has_nfo,
                         has_episode_image=has_episode_image,
                         match_group_id=group.id if group else None,
@@ -346,16 +371,22 @@ def scan_library(db: Session, root_id: int, task_id: int) -> None:
                     )
                 )
             task.progress = index / max(len(paths), 1)
-            task.message = f"正在扫描 {index}/{len(paths)}"
+            task.message = f"正在扫描{source_label} {index}/{len(paths)}"
             db.commit()
         merged_groups = delete_empty_pending_groups(db, root.id)
         update_catalog_sidecar_health(db, directory_cache)
-        root.last_scan_at = datetime.now(timezone.utc)
+        scanned_at = datetime.now(timezone.utc)
+        if source == "main":
+            root.last_scan_at = scanned_at
+        else:
+            root.scan_last_scan_at = scanned_at
         task.status = "completed"
         task.progress = 1
         task.message = "扫描完成"
         task.result = {
             "found": len(paths),
+            "source": source,
+            "source_path": str(root_path),
             "created": created,
             "updated": updated,
             "merged_groups": merged_groups,

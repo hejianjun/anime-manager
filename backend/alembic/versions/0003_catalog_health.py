@@ -15,32 +15,43 @@ depends_on = None
 
 
 def upgrade() -> None:
-    with op.batch_alter_table("anime") as batch:
-        batch.add_column(
-            sa.Column(
-                "has_show_nfo",
-                sa.Boolean(),
-                nullable=False,
-                server_default=sa.false(),
+    inspector = sa.inspect(op.get_bind())
+    anime_columns = {
+        column["name"] for column in inspector.get_columns("anime")
+    }
+    media_columns = {
+        column["name"] for column in inspector.get_columns("media_file")
+    }
+    if "has_show_nfo" not in anime_columns:
+        with op.batch_alter_table("anime") as batch:
+            batch.add_column(
+                sa.Column(
+                    "has_show_nfo",
+                    sa.Boolean(),
+                    nullable=False,
+                    server_default=sa.false(),
+                )
             )
-        )
-    with op.batch_alter_table("media_file") as batch:
-        batch.add_column(
-            sa.Column(
-                "has_nfo",
-                sa.Boolean(),
-                nullable=False,
-                server_default=sa.false(),
-            )
-        )
-        batch.add_column(
-            sa.Column(
-                "has_episode_image",
-                sa.Boolean(),
-                nullable=False,
-                server_default=sa.false(),
-            )
-        )
+    if "has_nfo" not in media_columns or "has_episode_image" not in media_columns:
+        with op.batch_alter_table("media_file") as batch:
+            if "has_nfo" not in media_columns:
+                batch.add_column(
+                    sa.Column(
+                        "has_nfo",
+                        sa.Boolean(),
+                        nullable=False,
+                        server_default=sa.false(),
+                    )
+                )
+            if "has_episode_image" not in media_columns:
+                batch.add_column(
+                    sa.Column(
+                        "has_episode_image",
+                        sa.Boolean(),
+                        nullable=False,
+                        server_default=sa.false(),
+                    )
+                )
 
 
 def downgrade() -> None:

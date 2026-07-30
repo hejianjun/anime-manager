@@ -13,6 +13,12 @@ depends_on = None
 
 
 def upgrade() -> None:
+    columns = {
+        column["name"]
+        for column in sa.inspect(op.get_bind()).get_columns("anime")
+    }
+    if "episode_titles" in columns:
+        return
     op.add_column(
         "anime",
         sa.Column(

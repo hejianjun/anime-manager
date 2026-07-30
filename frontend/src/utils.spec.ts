@@ -44,7 +44,7 @@ describe('candidate and task presentation', () => {
   })
 })
 
-const mediaFile = (id: number, episode: number | null, status = 'present'): MediaFile => ({
+const mediaFile = (id: number, episode: string | null, status = 'present'): MediaFile => ({
   id,
   path: `D:\\Anime\\${id}.mkv`,
   relative_path: `${id}.mkv`,
@@ -85,10 +85,11 @@ const anime = (episodeCount: number | null, files: MediaFile[]): Anime => ({
 describe('episode health presentation', () => {
   it('finds gaps using only present files in the expected episode range', () => {
     const result = getEpisodeHealth(anime(4, [
-      mediaFile(1, 1),
-      mediaFile(2, 3),
-      mediaFile(3, 2, 'missing'),
-      mediaFile(4, 8),
+      mediaFile(1, '1'),
+      mediaFile(2, '3'),
+      mediaFile(3, '2', 'missing'),
+      mediaFile(4, '8'),
+      mediaFile(5, 'S1'),
     ]))
     expect(result.missingEpisodes).toEqual([2, 4])
     expect(result.unfilledCount).toBe(0)
@@ -117,7 +118,7 @@ describe('catalog search', () => {
       search_keyword: '',
       status: 'pending',
       anime_id: null,
-      files: [mediaFile(1, 1)],
+      files: [mediaFile(1, '1')],
       candidates: [],
     }
     group.files[0].relative_path = '[Group] Frieren - 01.mkv'
@@ -128,7 +129,7 @@ describe('catalog search', () => {
   })
 
   it('matches a bound anime by title, original title, or file name', () => {
-    const item = anime(1, [mediaFile(1, 1)])
+    const item = anime(1, [mediaFile(1, '1')])
     item.title = '迷宫饭'
     item.original_title = 'Dungeon Meshi'
     item.files[0].relative_path = 'Delicious in Dungeon S01E01.mkv'

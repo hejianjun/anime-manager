@@ -19,7 +19,13 @@ from app.models import Anime, LibraryRoot, MatchGroup, MediaFile, ScrapeHistory,
 from app.scanner import scan_library
 
 
-def add_media(db: Session, root: LibraryRoot, path: Path, episode: int, group: MatchGroup | None = None) -> MediaFile:
+def add_media(
+    db: Session,
+    root: LibraryRoot,
+    path: Path,
+    episode: str | int,
+    group: MatchGroup | None = None,
+) -> MediaFile:
     media = MediaFile(
         library_root_id=root.id,
         path=str(path.resolve()),
@@ -181,6 +187,27 @@ def test_rename_plan_and_execute_move_files(tmp_path: Path) -> None:
         assert not source.exists()
         assert media.path == str(target)
         assert media.relative_path == str(target.relative_to(tmp_path))
+
+
+def test_rename_plan_accepts_alphanumeric_episode_identifier(tmp_path: Path) -> None:
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        root = LibraryRoot(path=str(tmp_path))
+        anime = Anime(title="作品名", episode_titles={"S1": "特别篇"})
+        db.add_all([root, anime])
+        db.flush()
+        source = tmp_path / "Example Special.mkv"
+        source.write_bytes(b"video")
+        media = add_media(db, root, source, "S1")
+        media.anime_id = anime.id
+        db.commit()
+        db.refresh(anime)
+
+        plan = build_rename_plan(anime, 1)
+
+        assert plan["blockers"] == []
+        assert Path(plan["files"][0]["target"]).name == "作品名 - S01ES1 - 特别篇.mkv"
 
 
 def test_rename_preserves_shared_directory_and_other_anime_files(
@@ -594,3 +621,60 @@ def test_cached_bulk_rename_rolls_back_partial_file_moves(
             for item in plan["files"]
             if item["changed"]
         )
+
+
+def test_bulk_rename_moves_scan_directory_media_into_main_directory(
+    tmp_path: Path,
+) -> None:
+    main_dir = tmp_path / "library"
+    scan_dir = tmp_path / "incoming"
+    source_dir = scan_dir / "Example"
+    main_dir.mkdir()
+    source_dir.mkdir(parents=True)
+    source = source_dir / "Example E01.mkv"
+    source.write_bytes(b"episode")
+
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        root = LibraryRoot(path=str(main_dir), scan_path=str(scan_dir))
+        anime = Anime(title="Example")
+        db.add_all([root, anime])
+        db.flush()
+        stat = source.stat()
+        media = MediaFile(
+            library_root_id=root.id,
+            anime_id=anime.id,
+            path=str(source.resolve()),
+            relative_path=str(source.relative_to(scan_dir)),
+            size=stat.st_size,
+            modified_ns=stat.st_mtime_ns,
+            parsed_title="Example",
+            episode=1,
+        )
+        db.add(media)
+        db.commit()
+
+        plan = build_bulk_rename_plan([anime], 1)
+        target = main_dir / "Example" / "Example - S01E01.mkv"
+
+        assert plan["anime_count"] == 1
+        assert plan["blockers"] == []
+        assert plan["files"][0]["source"] == str(source.resolve())
+        assert plan["files"][0]["target"] == str(target.absolute())
+
+        root.scan_path = None
+        db.flush()
+        with pytest.raises(AppError) as stale:
+            execute_cached_bulk_rename_plan(db, plan)
+        assert stale.value.code == "RENAME_PLAN_STALE"
+        root.scan_path = str(scan_dir)
+        db.flush()
+
+        result = execute_cached_bulk_rename_plan(db, plan)
+
+        assert target.read_bytes() == b"episode"
+        assert media.path == str(target.absolute())
+        assert media.relative_path == str(target.relative_to(main_dir))
+        assert result["moved"] == [str(target.absolute())]
+        assert (main_dir / ".delete" / "Example").is_dir()

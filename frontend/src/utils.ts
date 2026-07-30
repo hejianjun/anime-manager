@@ -50,9 +50,9 @@ export function getEpisodeHealth(anime: Anime): EpisodeHealth {
   const filledEpisodes = new Set(
     presentFiles
       .map(file => file.episode)
-      .filter((episode): episode is number =>
-        Number.isInteger(episode) && episode !== null && episode >= 1 && episode <= anime.episode_count!,
-      ),
+      .filter((episode): episode is string => episode !== null && /^\d+$/.test(episode))
+      .map(episode => Number(episode))
+      .filter(episode => episode >= 1 && episode <= anime.episode_count!),
   )
   const missingEpisodes = Array.from(
     { length: anime.episode_count },

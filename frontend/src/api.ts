@@ -16,7 +16,7 @@ export interface MediaFile {
   relative_path: string
   size: number
   parsed_title: string
-  episode: number | null
+  episode: string | null
   duration: number | null
   width: number | null
   height: number | null

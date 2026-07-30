@@ -82,7 +82,7 @@ def test_detail_title_falls_back_to_main_without_japanese() -> None:
     assert _preferred_detail_titles(titles) == ("Nihongo Name", "Nihongo Name")
 
 
-def test_episode_titles_prefer_japanese_and_ignore_specials() -> None:
+def test_episode_titles_prefer_japanese_and_include_alphanumeric_specials() -> None:
     root = etree.fromstring(
         b"""<anime>
         <episodes>
@@ -103,4 +103,8 @@ def test_episode_titles_prefer_japanese_and_ignore_specials() -> None:
         </anime>"""
     )
 
-    assert _episode_titles(root) == {"1": "Japanese episode", "2": "Romaji episode"}
+    assert _episode_titles(root) == {
+        "1": "Japanese episode",
+        "2": "Romaji episode",
+        "S1": "Special",
+    }

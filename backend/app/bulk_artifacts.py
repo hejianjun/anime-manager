@@ -18,6 +18,7 @@ from .description_translation import (
 )
 from .errors import AppError
 from .exporter import _atomic_write, _episode_nfo, _movie_nfo, _show_nfo
+from .library_paths import containing_library_path
 from .models import Anime, MediaFile, TaskRecord
 
 
@@ -31,15 +32,20 @@ def build_bulk_artifact_plan(animes: list[Anime]) -> dict:
         present = [item for item in anime.files if item.status == "present"]
         if not present:
             continue
-        roots = {Path(item.library_root.path) for item in present}
-        if len(roots) != 1:
+        root_ids = {item.library_root_id for item in present}
+        source_roots = {
+            containing_library_path(Path(item.path), item.library_root)
+            for item in present
+        }
+        if len(root_ids) != 1 or None in source_roots or len(source_roots) != 1:
             skipped.append({
                 "anime_id": anime.id,
                 "title": anime.title,
-                "reason": "作品跨越多个媒体库",
+                "reason": "作品跨越多个媒体库目录",
             })
             continue
-        root = next(iter(roots))
+        root = next(iter(source_roots))
+        assert root is not None
         videos = [Path(item.path) for item in present]
         try:
             common_dir = Path(os.path.commonpath([str(video.parent) for video in videos]))

@@ -13,6 +13,7 @@ import httpx
 from sqlalchemy.orm import Session
 
 from .errors import AppError
+from .library_paths import containing_library_path
 from .models import Anime, ExportHistory
 
 
@@ -44,9 +45,14 @@ def _show_nfo(anime: Anime) -> bytes:
     return _xml_bytes(root)
 
 
-def _episode_nfo(anime: Anime, episode: int) -> bytes:
+def _episode_nfo(anime: Anime, episode: str | int) -> bytes:
     root = ET.Element("episodedetails")
-    title = (anime.episode_titles or {}).get(str(episode)) or f"{anime.title} - {episode:02d}"
+    episode_text = str(episode)
+    fallback_number = episode_text.zfill(2) if episode_text.isdigit() else episode_text
+    title = (
+        (anime.episode_titles or {}).get(episode_text)
+        or f"{anime.title} - {fallback_number}"
+    )
     _text(root, "title", title)
     _text(root, "showtitle", anime.title)
     _text(root, "season", 1)
@@ -85,10 +91,25 @@ def build_export_plan(anime: Anime) -> dict:
     present = [item for item in anime.files if item.status == "present"]
     if not present:
         raise AppError("NO_MEDIA_FILES", "作品没有可用媒体文件", status_code=409)
-    roots = {Path(item.library_root.path).resolve() for item in present}
-    if len(roots) != 1:
-        raise AppError("MULTIPLE_LIBRARY_ROOTS", "同一作品跨越多个媒体库，暂不支持导出", status_code=409)
-    library_root = next(iter(roots))
+    root_ids = {item.library_root_id for item in present}
+    source_roots = {
+        containing_library_path(Path(item.path), item.library_root)
+        for item in present
+    }
+    if len(root_ids) != 1 or len(source_roots) != 1:
+        raise AppError(
+            "MULTIPLE_LIBRARY_ROOTS",
+            "同一作品跨越多个媒体库目录，暂不支持导出",
+            status_code=409,
+        )
+    if None in source_roots:
+        raise AppError(
+            "PATH_OUTSIDE_LIBRARY",
+            "导出路径越过主目录和扫描目录边界",
+            status_code=400,
+        )
+    library_root = next(iter(source_roots))
+    assert library_root is not None
     file_paths = [Path(item.path).resolve() for item in present]
     common_dir = Path(os.path.commonpath([str(path.parent) for path in file_paths]))
     if not _inside(common_dir, library_root):
