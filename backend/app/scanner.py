@@ -16,7 +16,17 @@ from .errors import AppError
 from .models import Anime, LibraryRoot, MatchGroup, MediaFile, TaskRecord
 from .parser import parse_filename
 
-VIDEO_EXTENSIONS = {".mkv", ".mp4", ".avi", ".mov", ".wmv", ".m4v", ".ts", ".webm"}
+VIDEO_EXTENSIONS = {
+    ".mkv",
+    ".mp4",
+    ".avi",
+    ".mov",
+    ".wmv",
+    ".m4v",
+    ".ts",
+    ".webm",
+    ".rmvb",
+}
 DELETION_DIRECTORY_NAME = ".delete"
 FOLDER_YEAR = re.compile(
     r"(?<!\d)(?:19|20)\d{2}(?!\d)"

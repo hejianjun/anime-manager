@@ -81,7 +81,21 @@ def _recorded_source_directory(media: MediaFile) -> Path | None:
     prefix = "directory::"
     if not group or not group.group_key.casefold().startswith(prefix):
         return None
-    return Path(group.group_key[len(prefix):])
+    directory = group.group_key[len(prefix):]
+    # 同一目录已有已确认分组时，扫描器会给新的待确认分组追加此状态后缀；
+    # 后缀不是物理路径的一部分，进入 pathlib 前必须移除。
+    pending_suffix = "::pending"
+    if directory.casefold().endswith(pending_suffix):
+        directory = directory[: -len(pending_suffix)]
+    return Path(directory) if directory else None
+
+
+def _is_directory(path: Path) -> bool:
+    """Windows 对非法或瞬时不可用的 UNC 路径可能抛 OSError，而不是返回 False。"""
+    try:
+        return path.is_dir()
+    except OSError:
+        return False
 
 
 def _remaining_sidecars(
@@ -95,7 +109,7 @@ def _remaining_sidecars(
     for source_dir in sorted(source_dirs, key=lambda path: str(path).casefold()):
         resolved_dir = source_dir.absolute()
         if (
-            not resolved_dir.is_dir()
+            not _is_directory(resolved_dir)
             or not any(resolved_dir.is_relative_to(root) for root in source_roots)
         ):
             continue
@@ -128,7 +142,7 @@ def _cleanup_source_candidates(
     candidates = {
         source_dir.absolute()
         for source_dir in source_dirs
-        if source_dir.absolute().is_dir()
+        if _is_directory(source_dir.absolute())
         and any(source_dir.absolute().is_relative_to(root) for root in source_roots)
         and source_dir.absolute()
         not in {*source_roots, target_dir, deletion_dir}

@@ -210,6 +210,42 @@ def test_rename_plan_accepts_alphanumeric_episode_identifier(tmp_path: Path) -> 
         assert Path(plan["files"][0]["target"]).name == "作品名 - S01ES1 - 特别篇.mkv"
 
 
+def test_rename_plan_strips_pending_suffix_from_recorded_directory(
+    tmp_path: Path,
+) -> None:
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        source_dir = tmp_path / "incoming"
+        source_dir.mkdir()
+        source = source_dir / "Example E01.mkv"
+        source.write_bytes(b"video")
+        root = LibraryRoot(path=str(tmp_path))
+        anime = Anime(title="Example")
+        db.add_all([root, anime])
+        db.flush()
+        group = MatchGroup(
+            library_root_id=root.id,
+            group_key=f"directory::{str(source_dir.resolve()).casefold()}::pending",
+            display_title="Example",
+            search_keyword="Example",
+            status="confirmed",
+            anime_id=anime.id,
+        )
+        db.add(group)
+        db.flush()
+        media = add_media(db, root, source, "1", group)
+        media.anime_id = anime.id
+        db.commit()
+        db.refresh(anime)
+
+        plan = build_rename_plan(anime, 1)
+
+        assert plan["blockers"] == []
+        assert Path(plan["files"][0]["target"]).name == "Example - S01E01.mkv"
+        assert plan["cleanup_dirs"][0]["source"] == str(source_dir.resolve())
+
+
 def test_rename_preserves_shared_directory_and_other_anime_files(
     tmp_path: Path,
 ) -> None:

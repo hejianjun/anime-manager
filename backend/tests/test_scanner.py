@@ -146,6 +146,30 @@ def test_scan_removes_folder_year_from_default_search_keyword(
         assert group.search_keyword == "葬送のフリーレン"
 
 
+def test_scan_supports_rmvb_files_case_insensitively(
+    tmp_path: Path, monkeypatch
+) -> None:
+    media_path = tmp_path / "Example - 01.RMVB"
+    media_path.write_bytes(b"rmvb episode")
+
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    monkeypatch.setattr("app.scanner.probe_media", lambda _path: ({}, None))
+
+    with Session(engine) as db:
+        root = LibraryRoot(path=str(tmp_path))
+        task = TaskRecord(kind="scan_library")
+        db.add_all([root, task])
+        db.commit()
+
+        scan_library(db, root.id, task.id)
+
+        scanned = db.query(MediaFile).one()
+        assert scanned.path == str(media_path.resolve())
+        assert scanned.relative_path == media_path.name
+        assert db.get(TaskRecord, task.id).result["found"] == 1
+
+
 def test_scan_ignores_deletion_directory(tmp_path: Path, monkeypatch) -> None:
     active = tmp_path / "active"
     deleted = tmp_path / ".delete" / "old-series"
