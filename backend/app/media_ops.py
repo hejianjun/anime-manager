@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import copy
+import os
 import re
 import shutil
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
@@ -12,6 +15,7 @@ from sqlalchemy.orm import Session
 
 from .errors import AppError
 from .episode_numbers import episode_filename_code, episode_sort_key
+from .exporter import _episode_nfo, _movie_nfo, _show_nfo
 from .library_paths import configured_library_paths, containing_library_path
 from .models import Anime, MatchGroup, MediaFile, ScrapeHistory
 from .parser import parse_filename
@@ -383,6 +387,7 @@ def _append_rename_entry(
     *,
     target_dir_exists: bool,
     metadata: dict | None = None,
+    allow_existing_target: bool = False,
 ) -> None:
     """登记单个重命名条目，并统一执行目标冲突和覆盖检查。"""
     source = Path(entry["source"])
@@ -391,7 +396,12 @@ def _append_rename_entry(
     # 同一作品内的所有视频和附属文件共享目标集合，避免互相覆盖。
     if target in targets:
         blockers.append(f"多个文件将写入同一目标: {target}")
-    elif target_dir_exists and target.exists() and target != source:
+    elif (
+        not allow_existing_target
+        and target_dir_exists
+        and target.exists()
+        and target != source
+    ):
         blockers.append(f"目标文件已存在: {target}")
 
     targets.add(target)
@@ -488,6 +498,137 @@ def _add_remaining_sidecar_entries(
         )
 
 
+def _append_generated_nfo(
+    context: _RenamePlanContext,
+    state: _RenamePlanState,
+    *,
+    source: Path,
+    target: Path,
+    nfo_scope: str,
+    media_id: int | None,
+    episode: str | int | None = None,
+    episode_title: str | None = None,
+    can_generate: bool = True,
+) -> None:
+    """把执行前需要补写的 NFO 登记为文件计划，缓存 XML 内容并禁止覆盖。"""
+    source = source.absolute()
+    target = target.absolute()
+    if source.exists():
+        return
+    planned_target_exists = target.exists()
+    _append_rename_entry(
+        state.files,
+        state.targets,
+        state.blockers,
+        {
+            "media_id": None,
+            "source": str(source),
+            "target": str(target),
+            "kind": "nfo",
+            "generated": True,
+            "nfo_scope": nfo_scope,
+            "nfo_media_id": media_id,
+            "planned_target_exists": planned_target_exists,
+            "can_generate": can_generate,
+        },
+        target_dir_exists=context.target_dir_exists,
+        metadata={
+            "episode": episode,
+            "episode_title": episode_title,
+        },
+        allow_existing_target=True,
+    )
+    if planned_target_exists:
+        state.files[-1]["changed"] = False
+
+
+def _add_missing_nfo_entries(
+    context: _RenamePlanContext,
+    state: _RenamePlanState,
+    exclusive_dirs: set[Path],
+) -> list[str]:
+    """规划重命名前缺失的 Jellyfin NFO，并拒绝污染共享作品目录。"""
+    nfo_blockers: list[str] = []
+    video_entries = {
+        item["media_id"]: item
+        for item in state.files
+        if item["kind"] == "video" and item.get("media_id") is not None
+    }
+    is_movie = (
+        len(context.present) == 1
+        and (context.anime.media_type or "").casefold() == "movie"
+    )
+
+    if is_movie:
+        media = context.present[0]
+        video_entry = video_entries.get(media.id)
+        if video_entry:
+            source_video = Path(video_entry["source"])
+            target_video = Path(video_entry["target"])
+            _append_generated_nfo(
+                context,
+                state,
+                source=source_video.with_suffix(".nfo"),
+                target=target_video.with_suffix(".nfo"),
+                nfo_scope="movie",
+                media_id=media.id,
+            )
+        return nfo_blockers
+
+    media_parents = [Path(item.path).absolute().parent for item in context.present]
+    common_dir = Path(os.path.commonpath([str(path) for path in media_parents])).absolute()
+    show_source = common_dir / "tvshow.nfo"
+    show_target = context.target_dir / "tvshow.nfo"
+    show_dir_is_safe = (
+        common_dir == context.target_dir
+        or common_dir in exclusive_dirs
+    )
+    if not show_dir_is_safe:
+        if not show_target.exists():
+            nfo_blockers.append(
+                f"作品目录可能与其他作品共享，无法安全写入或迁移 tvshow.nfo: {common_dir}"
+            )
+        elif not show_source.exists():
+            _append_generated_nfo(
+                context,
+                state,
+                source=show_source,
+                target=show_target,
+                nfo_scope="tvshow",
+                media_id=None,
+                can_generate=False,
+            )
+    elif not show_source.exists():
+        _append_generated_nfo(
+            context,
+            state,
+            source=show_source,
+            target=show_target,
+            nfo_scope="tvshow",
+            media_id=None,
+        )
+
+    for media in context.present:
+        if media.episode is None:
+            continue
+        video_entry = video_entries.get(media.id)
+        if not video_entry:
+            continue
+        source_video = Path(video_entry["source"])
+        target_video = Path(video_entry["target"])
+        _append_generated_nfo(
+            context,
+            state,
+            source=source_video.with_suffix(".nfo"),
+            target=target_video.with_suffix(".nfo"),
+            nfo_scope="episode",
+            media_id=media.id,
+            episode=media.episode,
+            episode_title=video_entry.get("episode_title"),
+        )
+    return nfo_blockers
+
+
 def build_rename_plan(anime: Anime, season: int = 1) -> dict:
     """生成单作品的只读重命名预览，不移动文件或修改数据库。"""
     context = _prepare_rename_plan(anime, season)
@@ -512,6 +653,7 @@ def build_rename_plan(anime: Anime, season: int = 1) -> dict:
         context.source_roots,
     )
     _add_remaining_sidecar_entries(context, state, exclusive_dirs)
+    nfo_blockers = _add_missing_nfo_entries(context, state, exclusive_dirs)
 
     cleanup_dirs, cleanup_blockers = _cleanup_directory_plan(
         exclusive_dirs,
@@ -527,7 +669,13 @@ def build_rename_plan(anime: Anime, season: int = 1) -> dict:
         "source_roots": [str(path) for path in context.source_roots],
         "target_dir": str(context.target_dir),
         "deletion_dir": str(context.library_root / DELETION_DIRECTORY_NAME),
-        "blockers": state.blockers,
+        "blockers": [*state.blockers, *nfo_blockers],
+        "nfo_blockers": nfo_blockers,
+        "nfo_create_count": sum(
+            bool(item.get("generated"))
+            and not item.get("planned_target_exists")
+            for item in state.files
+        ),
         "files": state.files,
         "cleanup_dirs": cleanup_dirs,
         "preserved_dirs": state.preserved_dirs,
@@ -735,6 +883,15 @@ def build_bulk_rename_plan(
                 )
                 continue
 
+            if plan["nfo_blockers"]:
+                state.skipped.append(
+                    {
+                        "anime_id": anime.id,
+                        "title": anime.title,
+                        "reason": "；".join(plan["nfo_blockers"]),
+                    }
+                )
+                continue
             _merge_bulk_anime_plan(state, anime, plan)
         finally:
             # 无论作品成功、跳过还是失败，都向 SSE 任务报告已完成检查。
@@ -746,6 +903,11 @@ def build_bulk_rename_plan(
         "anime_count": len(state.included_anime_ids),
         "file_count": len(state.files),
         "changed_count": sum(1 for item in state.files if item["changed"]),
+        "nfo_create_count": sum(
+            bool(item.get("generated"))
+            and not item.get("planned_target_exists")
+            for item in state.files
+        ),
         "cleanup_count": sum(1 for item in state.cleanup_dirs if item["changed"]),
         "blockers": state.blockers,
         "skipped": state.skipped,
@@ -753,6 +915,209 @@ def build_bulk_rename_plan(
         "cleanup_dirs": state.cleanup_dirs,
         "preserved_dirs": state.preserved_dirs,
     }
+
+
+def _generated_nfo_groups(plan: dict) -> dict[int, list[dict]]:
+    """按作品聚合执行前需要生成的 NFO；单作品计划使用顶层 anime_id。"""
+    groups: dict[int, list[dict]] = {}
+    default_anime_id = plan.get("anime_id")
+    for item in plan["files"]:
+        if not item.get("generated"):
+            continue
+        anime_id = item.get("anime_id", default_anime_id)
+        if anime_id is not None:
+            groups.setdefault(anime_id, []).append(item)
+    return groups
+
+
+def _write_missing_nfo(path: Path, content: str) -> bool:
+    """通过同目录临时文件发布 NFO；目标已出现时保留现有文件。"""
+    if path.exists():
+        return False
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, temp_name = tempfile.mkstemp(prefix=".anime-manager-nfo-", dir=path.parent)
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(content.encode("utf-8"))
+            handle.flush()
+            os.fsync(handle.fileno())
+        try:
+            # Windows/SMB 上 rename 不覆盖现有目标，避免预览后的竞态写坏 NAS NFO。
+            os.rename(temp_name, path)
+        except FileExistsError:
+            return False
+        return True
+    finally:
+        if os.path.exists(temp_name):
+            os.unlink(temp_name)
+
+
+def _prepare_generated_nfos(
+    db: Session,
+    plan: dict,
+    *,
+    skip_failures: bool,
+    progress_callback: Callable[[str], None] | None = None,
+) -> tuple[dict, list[dict], list[dict], set[int]]:
+    """先补齐全部作品 NFO；批量模式下失败作品整体从移动计划中剔除。"""
+    execution_plan = copy.deepcopy(plan)
+    groups = _generated_nfo_groups(execution_plan)
+    written: list[dict] = []
+    runtime_skipped: list[dict] = []
+    failed_anime_ids: set[int] = set()
+    satisfied_at_target: set[tuple[str, str]] = set()
+
+    for anime_id, entries in groups.items():
+        title = next(
+            (
+                item.get("anime_title")
+                for item in entries
+                if item.get("anime_title")
+            ),
+            str(anime_id),
+        )
+        try:
+            # 先检查可预见冲突，避免同一作品检查到一半才开始写文件。
+            for item in entries:
+                source = Path(item["source"])
+                target = Path(item["target"])
+                if source != target and source.exists() and target.exists():
+                    raise AppError(
+                        "NFO_TARGET_CONFLICT",
+                        f"NFO 源文件和目标文件同时存在，无法无损合并: {source} -> {target}",
+                        status_code=409,
+                    )
+
+            for item in entries:
+                source = Path(item["source"])
+                target = Path(item["target"])
+                if source != target and target.exists() and not source.exists():
+                    satisfied_at_target.add((item["source"], item["target"]))
+                    continue
+                if not item.get("can_generate", True) and not source.exists():
+                    raise AppError(
+                        "NFO_SOURCE_DIRECTORY_UNSAFE",
+                        f"目标 NFO 已消失，源目录可能共享，无法安全补写: {target}",
+                        status_code=409,
+                    )
+                item["changed"] = source != target
+                anime = db.get(Anime, anime_id)
+                if not anime:
+                    raise AppError(
+                        "NOT_FOUND",
+                        f"NFO 对应作品不存在: {anime_id}",
+                        status_code=404,
+                    )
+                if item["nfo_scope"] == "tvshow":
+                    content = _show_nfo(anime)
+                elif item["nfo_scope"] == "movie":
+                    content = _movie_nfo(anime)
+                else:
+                    content = _episode_nfo(anime, item["episode"])
+                if _write_missing_nfo(source, content.decode("utf-8")):
+                    written.append(item)
+                    if progress_callback:
+                        progress_callback(str(source))
+        except Exception as exc:
+            if not skip_failures:
+                raise AppError(
+                    "NFO_WRITE_FAILED",
+                    f"重命名前写入 NFO 失败: {exc}",
+                    details={"anime_id": anime_id, "title": title},
+                    status_code=getattr(exc, "status_code", 500),
+                ) from exc
+            failed_anime_ids.add(anime_id)
+            runtime_skipped.append(
+                {
+                    "anime_id": anime_id,
+                    "title": title,
+                    "reason": f"重命名前写入 NFO 失败: {exc}",
+                }
+            )
+
+    def keep_file(item: dict) -> bool:
+        anime_id = item.get("anime_id", execution_plan.get("anime_id"))
+        if anime_id in failed_anime_ids:
+            return False
+        return (item["source"], item["target"]) not in satisfied_at_target
+
+    execution_plan["files"] = [
+        item for item in execution_plan["files"] if keep_file(item)
+    ]
+    execution_plan["cleanup_dirs"] = [
+        item
+        for item in execution_plan["cleanup_dirs"]
+        if item.get("anime_id", execution_plan.get("anime_id"))
+        not in failed_anime_ids
+    ]
+    return execution_plan, written, runtime_skipped, failed_anime_ids
+
+
+def _rename_file_priority(item: dict) -> tuple[int, str]:
+    """NFO 必须先于视频到达 NAS，其他 sidecar 保持在视频之前。"""
+    if item["kind"] == "nfo" and item.get("nfo_scope") == "tvshow":
+        priority = 0
+    elif item["kind"] == "nfo":
+        priority = 1
+    elif item["kind"] == "video":
+        priority = 3
+    else:
+        priority = 2
+    return priority, item["target"].casefold()
+
+
+def _written_nfo_paths(items: list[dict]) -> list[str]:
+    """生成项可能已移动到目标，也可能因作品跳过而仍留在源目录。"""
+    paths: list[str] = []
+    for item in items:
+        target = Path(item["target"])
+        source = Path(item["source"])
+        paths.append(str(target if target.exists() else source))
+    return paths
+
+
+def _result_moved_paths(
+    plan: dict,
+    moved: list[tuple[Path, Path]],
+) -> list[str]:
+    """响应保持预览中的文件顺序，不暴露为 NAS 安全而调整过的物理移动顺序。"""
+    moved_targets = {target for _, target in moved}
+    ordered = [
+        str(Path(item["target"]))
+        for item in plan["files"]
+        if item["changed"] and Path(item["target"]) in moved_targets
+    ]
+    known = {Path(path) for path in ordered}
+    ordered.extend(str(target) for _, target in moved if target not in known)
+    return ordered
+
+
+def _update_generated_nfo_health(
+    db: Session,
+    plan: dict,
+    failed_anime_ids: set[int] | None = None,
+) -> None:
+    """根据作品是否执行成功，用实际落位路径同步持久化的 NFO 健康标记。"""
+    failed_anime_ids = failed_anime_ids or set()
+    default_anime_id = plan.get("anime_id")
+    for item in plan["files"]:
+        if not item.get("generated"):
+            continue
+        anime_id = item.get("anime_id", default_anime_id)
+        expected = Path(
+            item["source"] if anime_id in failed_anime_ids else item["target"]
+        )
+        if not expected.exists():
+            continue
+        if item.get("nfo_scope") == "tvshow" and anime_id is not None:
+            anime = db.get(Anime, anime_id)
+            if anime:
+                anime.has_show_nfo = True
+        else:
+            media_id = item.get("nfo_media_id")
+            media = db.get(MediaFile, media_id) if media_id is not None else None
+            if media:
+                media.has_nfo = True
 
 
 def _execute_plan_files(
@@ -764,10 +1129,11 @@ def _execute_plan_files(
     """按计划移动文件、同步媒体路径，并实时记录可供回滚的移动顺序。"""
     moved = moved if moved is not None else []
     # 先创建全部目标目录，避免移动到一半才因父目录缺失中止。
-    target_dirs = {Path(item["target"]).parent for item in plan["files"] if item["changed"]}
+    ordered_files = sorted(plan["files"], key=_rename_file_priority)
+    target_dirs = {Path(item["target"]).parent for item in ordered_files if item["changed"]}
     for target_dir in target_dirs:
         target_dir.mkdir(parents=True, exist_ok=True)
-    for item in plan["files"]:
+    for item in ordered_files:
         if not item["changed"]:
             continue
         source = Path(item["source"])
@@ -833,19 +1199,33 @@ def execute_rename_plan(db: Session, anime: Anime, season: int = 1) -> dict:
 
     moved: list[tuple[Path, Path]] = []
     archived: list[tuple[Path, Path]] = []
+    written_nfos: list[dict] = []
     try:
-        _execute_plan_files(db, plan, moved)
-        _execute_plan_directories(plan, archived)
+        execution_plan, written_nfos, _, _ = _prepare_generated_nfos(
+            db,
+            plan,
+            skip_failures=False,
+        )
+        _execute_plan_files(db, execution_plan, moved)
+        _execute_plan_directories(execution_plan, archived)
+        _update_generated_nfo_health(db, plan)
         db.commit()
         return {
-            "moved": [str(target) for _, target in moved],
+            "moved": _result_moved_paths(execution_plan, moved),
             "archived_dirs": [str(target) for _, target in archived],
+            "written_nfos": _written_nfo_paths(written_nfos),
         }
     except Exception:
         db.rollback()
         # 目录最后移动、最先回滚，随后再恢复目录内的各个文件。
         _rollback_moves(archived)
         _rollback_moves(moved)
+        # NFO 是重命名的保护产物；即使移动失败也保留在源媒体旁并同步健康状态。
+        try:
+            _update_generated_nfo_health(db, plan, {anime.id})
+            db.commit()
+        except Exception:
+            db.rollback()
         raise
 
 
@@ -868,10 +1248,18 @@ def _validate_planned_file(db: Session, item: dict) -> list[str]:
         return [f"路径越过媒体库边界: {source} -> {target}"]
 
     try:
-        if not source.is_file():
-            errors.append(f"源文件不存在或不可访问: {source}")
-        if target != source and target.exists():
-            errors.append(f"目标文件已存在: {target}")
+        if item.get("generated"):
+            # 生成项在预览时允许不存在；预览后新出现的源/目标 NFO 由准备阶段
+            # 按“不覆盖、按作品跳过”的规则重新解释。
+            if source.exists() and not source.is_file():
+                errors.append(f"NFO 源路径不是文件: {source}")
+            if target.exists() and not target.is_file():
+                errors.append(f"NFO 目标路径不是文件: {target}")
+        else:
+            if not source.is_file():
+                errors.append(f"源文件不存在或不可访问: {source}")
+            if target != source and target.exists():
+                errors.append(f"目标文件已存在: {target}")
     except OSError as error:
         errors.append(f"文件状态检查失败: {source}: {error}")
 
@@ -954,7 +1342,7 @@ def validate_bulk_rename_plan(db: Session, plan: dict) -> None:
         for item in plan["files"]
     }
     for item in plan["files"]:
-        if item["changed"]:
+        if item["changed"] or item.get("generated"):
             errors.extend(_validate_planned_file(db, item))
     for item in plan["cleanup_dirs"]:
         if item["changed"]:
@@ -978,10 +1366,16 @@ def execute_cached_bulk_rename_plan(
     validate_bulk_rename_plan(db, plan)
     moved: list[tuple[Path, Path]] = []
     archived: list[tuple[Path, Path]] = []
-    total = sum(1 for item in plan["files"] if item["changed"]) + sum(
-        1 for item in plan["cleanup_dirs"] if item["changed"]
+    total = (
+        sum(1 for item in plan["files"] if item.get("generated"))
+        + sum(1 for item in plan["files"] if item["changed"])
+        + sum(
+            1 for item in plan["cleanup_dirs"] if item["changed"]
+        )
     )
     completed = 0
+    written_nfos: list[dict] = []
+    failed_anime_ids: set[int] = set()
 
     def report(path: str) -> None:
         nonlocal completed
@@ -990,20 +1384,39 @@ def execute_cached_bulk_rename_plan(
             progress_callback(completed, total, path)
 
     try:
-        _execute_plan_files(db, plan, moved, report)
-        _execute_plan_directories(plan, archived, report)
+        (
+            execution_plan,
+            written_nfos,
+            runtime_skipped,
+            failed_anime_ids,
+        ) = _prepare_generated_nfos(
+            db,
+            plan,
+            skip_failures=True,
+            progress_callback=report,
+        )
+        _execute_plan_files(db, execution_plan, moved, report)
+        _execute_plan_directories(execution_plan, archived, report)
+        _update_generated_nfo_health(db, plan, failed_anime_ids)
         db.commit()
         return {
-            "anime_count": plan["anime_count"],
-            "skipped": plan["skipped"],
-            "moved": [str(target) for _, target in moved],
+            "anime_count": plan["anime_count"] - len(failed_anime_ids),
+            "skipped": [*plan["skipped"], *runtime_skipped],
+            "moved": _result_moved_paths(execution_plan, moved),
             "archived_dirs": [str(target) for _, target in archived],
+            "written_nfos": _written_nfo_paths(written_nfos),
         }
     except Exception:
         db.rollback()
         # 文件系统不受数据库事务管理，必须显式按相反顺序补偿。
         _rollback_moves(archived)
         _rollback_moves(moved)
+        try:
+            generated_anime_ids = set(_generated_nfo_groups(plan))
+            _update_generated_nfo_health(db, plan, generated_anime_ids)
+            db.commit()
+        except Exception:
+            db.rollback()
         raise
 
 

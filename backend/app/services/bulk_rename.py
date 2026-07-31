@@ -90,7 +90,7 @@ def _update_execute_progress(
         if not task:
             return
         task.progress = index / max(total, 1)
-        task.message = f"正在移动 {index}/{total}：{path}"
+        task.message = f"正在生成 NFO 或移动文件 {index}/{total}：{path}"
         task.result = {
             "preview_task_id": task.result.get("preview_task_id"),
             "processed": index,

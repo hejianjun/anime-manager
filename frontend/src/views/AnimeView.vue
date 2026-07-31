@@ -303,11 +303,15 @@ async function previewRename() {
 
 async function renameFiles() {
   if (!selected.value || renamePreview.value?.blockers?.length) return
-  await ElMessageBox.confirm('媒体文件将移动到作品目录，原作品文件夹随后移入隐藏目录“.delete”，不会覆盖现有文件。确认继续？', '批量重命名确认', { type: 'warning' })
+  await ElMessageBox.confirm(
+    `将先补齐 ${renamePreview.value?.nfo_create_count || 0} 个缺失 NFO，再移动 ${renamePreview.value?.files?.filter((item: any) => item.changed).length || 0} 个文件；原作品文件夹随后移入隐藏目录“.delete”，已有 NFO 不会被覆盖。确认继续？`,
+    '批量重命名确认',
+    { type: 'warning' },
+  )
   busy.value = true
   try {
     const result = (await api.post(`/anime/${selected.value.id}/rename`, { season: renameSeason.value })).data
-    ElMessage.success(`已处理 ${result.moved.length} 个文件，归档 ${result.archived_dirs.length} 个旧文件夹`)
+    ElMessage.success(`已生成 ${result.written_nfos.length} 个 NFO、处理 ${result.moved.length} 个文件，归档 ${result.archived_dirs.length} 个旧文件夹`)
     renameOpen.value = false
     selected.value = (await api.get(`/anime/${selected.value.id}`)).data
     await load()
@@ -369,7 +373,7 @@ async function renameAllFiles() {
     || (!bulkRenamePreview.value?.changed_count && !bulkRenamePreview.value?.cleanup_count)
   ) return
   await ElMessageBox.confirm(
-    `将处理 ${bulkRenamePreview.value.changed_count} 个媒体文件，并把 ${bulkRenamePreview.value.cleanup_count} 个旧文件夹移入隐藏目录“.delete”。确认继续？`,
+    `将先补齐 ${bulkRenamePreview.value.nfo_create_count || 0} 个缺失 NFO，再处理 ${bulkRenamePreview.value.changed_count} 个文件，并把 ${bulkRenamePreview.value.cleanup_count} 个旧文件夹移入隐藏目录“.delete”。已有 NFO 不会被覆盖，确认继续？`,
     '全部作品批量重命名确认',
     { type: 'warning' },
   )
@@ -383,7 +387,7 @@ async function renameAllFiles() {
     bulkRenamePreviewTaskId.value = null
     const completed = await waitForRenameTask(task.id, '全部作品重命名失败')
     const result = completed.result
-    ElMessage.success(`已处理 ${result.anime_count} 部作品、${result.moved.length} 个文件，归档 ${result.archived_dirs.length} 个旧文件夹`)
+    ElMessage.success(`已处理 ${result.anime_count} 部作品，生成 ${result.written_nfos.length} 个 NFO、移动 ${result.moved.length} 个文件、归档 ${result.archived_dirs.length} 个旧文件夹，跳过 ${result.skipped.length} 部作品`)
     bulkRenameOpen.value = false
     await load()
   } catch (error) { ElMessage.error((error as Error).message) }
@@ -689,13 +693,16 @@ onBeforeUnmount(() => bulkRenameEvents?.close())
       <span>季度</span>
       <el-input-number v-model="renameSeason" :min="0" :max="99" @change="previewRename" />
       <span class="muted">目标目录：{{ renamePreview?.target_dir }}</span>
+      <span class="muted">将先生成 {{ renamePreview?.nfo_create_count || 0 }} 个缺失 NFO</span>
     </div>
     <el-alert v-if="renamePreview?.blockers?.length" type="error" :closable="false" title="存在阻塞项">
       <div v-for="item in renamePreview.blockers" :key="item">{{ item }}</div>
     </el-alert>
     <el-table :data="renamePreview?.files || []" size="small">
       <el-table-column label="类型" width="90">
-        <template #default="{ row }">{{ renameKindLabels[row.kind] || row.kind }}</template>
+        <template #default="{ row }">
+          {{ row.generated ? `待生成${renameKindLabels[row.kind] || row.kind}` : (renameKindLabels[row.kind] || row.kind) }}
+        </template>
       </el-table-column>
       <el-table-column prop="episode" label="集" width="70" />
       <el-table-column prop="episode_title" label="集标题" min-width="190" show-overflow-tooltip />
@@ -743,9 +750,10 @@ onBeforeUnmount(() => bulkRenameEvents?.close())
       <el-input-number v-model="bulkRenameSeason" :min="0" :max="99" @change="previewBulkRename" />
       <span class="muted">
         {{ bulkRenamePreview?.anime_count || 0 }} 部目录名不一致作品 ·
+        先生成 {{ bulkRenamePreview?.nfo_create_count || 0 }} 个缺失 NFO ·
         {{ bulkRenamePreview?.changed_count || 0 }} 个文件需要处理 ·
         {{ bulkRenamePreview?.cleanup_count || 0 }} 个旧文件夹需要归档 ·
-        {{ bulkRenamePreview?.skipped?.length || 0 }} 部无可用文件
+        {{ bulkRenamePreview?.skipped?.length || 0 }} 部跳过
       </span>
     </div>
     <el-alert v-if="bulkRenamePreview?.blockers?.length" type="error" :closable="false" title="存在阻塞项">
@@ -760,7 +768,9 @@ onBeforeUnmount(() => bulkRenameEvents?.close())
     <el-table :data="bulkChangedFiles" size="small" max-height="560">
       <el-table-column prop="anime_title" label="作品" min-width="190" show-overflow-tooltip />
       <el-table-column label="类型" width="90">
-        <template #default="{ row }">{{ renameKindLabels[row.kind] || row.kind }}</template>
+        <template #default="{ row }">
+          {{ row.generated ? `待生成${renameKindLabels[row.kind] || row.kind}` : (renameKindLabels[row.kind] || row.kind) }}
+        </template>
       </el-table-column>
       <el-table-column prop="episode" label="集" width="70" />
       <el-table-column prop="episode_title" label="集标题" min-width="190" show-overflow-tooltip />
