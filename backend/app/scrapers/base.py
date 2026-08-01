@@ -7,11 +7,14 @@ from typing import Any
 
 import httpx
 from sqlalchemy import select
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session
 
 from ..models import AppSetting, SourceSnapshot
 
-SOURCE_CACHE_AGE = timedelta(days=1)
+# Getchu product metadata changes rarely. Keep successful detail responses long
+# enough for repeated batch sessions to avoid unnecessary site requests.
+SOURCE_CACHE_AGE = timedelta(days=30)
 
 
 @dataclass
@@ -95,10 +98,30 @@ def store_source_metadata(
     cached: SourceSnapshot | None,
 ) -> None:
     normalized = asdict(metadata)
+    fetched_at = datetime.now(timezone.utc)
+    if db.get_bind().dialect.name == "sqlite":
+        statement = sqlite_insert(SourceSnapshot).values(
+            source=source,
+            source_id=source_id,
+            raw_payload=raw_payload,
+            normalized_payload=normalized,
+            fetched_at=fetched_at,
+        )
+        statement = statement.on_conflict_do_update(
+            index_elements=[SourceSnapshot.source, SourceSnapshot.source_id],
+            set_={
+                "raw_payload": raw_payload,
+                "normalized_payload": normalized,
+                "fetched_at": fetched_at,
+            },
+        )
+        db.execute(statement)
+        db.flush()
+        return
     if cached:
         cached.raw_payload = raw_payload
         cached.normalized_payload = normalized
-        cached.fetched_at = datetime.now(timezone.utc)
+        cached.fetched_at = fetched_at
     else:
         db.add(
             SourceSnapshot(

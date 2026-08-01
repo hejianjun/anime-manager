@@ -44,7 +44,42 @@ const descriptionSearchErrors = ref<Array<{ source: string; message: string }>>(
 const descriptionSelection = ref('')
 const descriptionSearching = ref(false)
 const descriptionFilling = ref(false)
+type GetchuCandidate = {
+  source_id: string
+  title: string
+  year: number | null
+  cover_url: string | null
+  score: number
+}
+type GetchuRow = {
+  anime_id: number
+  anime_title: string
+  search_keyword: string
+  search_status: 'pending' | 'searching' | 'ready' | 'no_candidate' | 'failed' | 'cancelled'
+  candidates: GetchuCandidate[]
+  default_source_id: string | null
+  description_preview: string | null
+  nfo_targets: Array<{ path: string; kind: string; exists: boolean | null }>
+  blockers: string[]
+  error: { message: string } | null
+}
+const getchuOpen = ref(false)
+const getchuPreviewTaskId = ref<number | null>(null)
+const getchuRows = ref<GetchuRow[]>([])
+const getchuSearchStatus = ref('idle')
+const getchuSearchProgress = ref(0)
+const getchuSearchMessage = ref('')
+const getchuSelections = ref<Record<number, string>>({})
+const getchuDetails = ref<Record<string, string>>({})
+const getchuDetailLoading = ref<Record<number, boolean>>({})
+const getchuConfirming = ref<Record<number, boolean>>({})
+const getchuClosing = ref(false)
+const getchuChildren = ref<any[]>([])
+const handledGetchuTasks = new Set<number>()
 let bulkRenameEvents: EventSource | null = null
+let getchuEvents: EventSource | null = null
+let getchuChildrenTimer: ReturnType<typeof setTimeout> | null = null
+let getchuChildrenRequest: Promise<void> | null = null
 const playerUrl = computed(() => playerFile.value ? `/api/media-files/${playerFile.value.id}/stream` : '')
 
 const itemHealth = computed(() =>
@@ -65,6 +100,9 @@ const filteredItems = computed(() => {
     })
   })
 })
+const getchuEligibleItems = computed(() =>
+  filteredItems.value.filter(item => !(item.description || '').trim()),
+)
 const missingAnimeCount = computed(() =>
   items.value.filter(item => itemHealth.value[item.id].missingEpisodes.length > 0).length,
 )
@@ -86,6 +124,12 @@ const missingEpisodeImageCount = computed(() =>
 const bulkChangedFiles = computed(() =>
   (bulkRenamePreview.value?.files || []).filter((item: any) => item.changed),
 )
+const getchuTaskSummary = computed(() => ({
+  confirmed: getchuChildren.value.length,
+  queued: getchuChildren.value.filter(item => ['pending', 'running'].includes(item.status)).length,
+  completed: getchuChildren.value.filter(item => item.status === 'completed').length,
+  failed: getchuChildren.value.filter(item => item.status === 'failed').length,
+}))
 const renameKindLabels: Record<string, string> = {
   video: '视频',
   nfo: 'NFO',
@@ -230,6 +274,254 @@ async function fillDescription() {
     ElMessage.error((error as Error).message)
   } finally {
     descriptionFilling.value = false
+  }
+}
+
+function applyGetchuTask(current: any) {
+  getchuSearchStatus.value = current.status
+  getchuSearchProgress.value = Math.round((current.progress || 0) * 100)
+  getchuSearchMessage.value = current.message || ''
+  const rows = (current.result?.items || []) as GetchuRow[]
+  getchuRows.value = rows
+  for (const row of rows) {
+    if (!getchuSelections.value[row.anime_id] && row.default_source_id) {
+      getchuSelections.value[row.anime_id] = row.default_source_id
+    }
+    if (row.description_preview && row.default_source_id) {
+      getchuDetails.value[`${row.anime_id}:${row.default_source_id}`] = row.description_preview
+    }
+  }
+}
+
+function watchGetchuPreview(taskId: number) {
+  getchuEvents?.close()
+  const events = new EventSource(`/api/tasks/${taskId}/events`)
+  getchuEvents = events
+  events.onmessage = (event) => {
+    try {
+      const current = JSON.parse(event.data)
+      applyGetchuTask(current)
+      if (['completed', 'failed'].includes(current.status)) {
+        events.close()
+        if (getchuEvents === events) getchuEvents = null
+      }
+    } catch (error) {
+      ElMessage.error((error as Error).message)
+    }
+  }
+  events.onerror = () => {
+    getchuSearchMessage.value = '实时搜索连接中断，浏览器正在自动重连'
+  }
+}
+
+async function refreshGetchuChildren() {
+  if (!getchuPreviewTaskId.value) return
+  if (getchuChildrenRequest) return getchuChildrenRequest
+  const previewTaskId = getchuPreviewTaskId.value
+  getchuChildrenRequest = (async () => {
+    try {
+      getchuChildren.value = (await api.get(`/tasks/${previewTaskId}/children`)).data
+      let changed = false
+      for (const task of getchuChildren.value) {
+        if (task.status === 'completed' && !handledGetchuTasks.has(task.id)) {
+          handledGetchuTasks.add(task.id)
+          changed = true
+        }
+      }
+      if (changed) await load()
+    } catch {
+      // 父任务刚创建或服务短暂不可用时，下一轮轮询会自动恢复。
+    }
+  })()
+  try {
+    await getchuChildrenRequest
+  } finally {
+    getchuChildrenRequest = null
+  }
+}
+
+function startGetchuChildPolling() {
+  if (getchuChildrenTimer) clearTimeout(getchuChildrenTimer)
+  const poll = async () => {
+    await refreshGetchuChildren()
+    if (getchuPreviewTaskId.value) {
+      getchuChildrenTimer = setTimeout(poll, 2000)
+    }
+  }
+  void poll()
+}
+
+async function startGetchuPreview(force = false) {
+  if (getchuPreviewTaskId.value && !force) {
+    getchuOpen.value = true
+    return
+  }
+  const animeIds = getchuEligibleItems.value.map(item => item.id)
+  if (!animeIds.length) return
+  busy.value = true
+  try {
+    const task = (await api.post('/anime/getchu-description-preview', { anime_ids: animeIds })).data
+    getchuPreviewTaskId.value = task.id
+    getchuSelections.value = {}
+    getchuDetails.value = {}
+    getchuChildren.value = []
+    handledGetchuTasks.clear()
+    applyGetchuTask(task)
+    getchuOpen.value = true
+    watchGetchuPreview(task.id)
+    startGetchuChildPolling()
+  } catch (error) {
+    ElMessage.error((error as Error).message)
+  } finally {
+    busy.value = false
+  }
+}
+
+function getchuDetailText(row: GetchuRow) {
+  const sourceId = getchuSelections.value[row.anime_id]
+  return getchuDetails.value[`${row.anime_id}:${sourceId}`] || row.description_preview || ''
+}
+
+async function loadGetchuDetail(row: GetchuRow) {
+  const sourceId = getchuSelections.value[row.anime_id]
+  if (!sourceId || !getchuPreviewTaskId.value) return
+  const key = `${row.anime_id}:${sourceId}`
+  if (getchuDetails.value[key]) return
+  getchuDetailLoading.value[row.anime_id] = true
+  try {
+    const detail = (await api.post(`/anime/${row.anime_id}/getchu-description-detail`, {
+      preview_task_id: getchuPreviewTaskId.value,
+      source_id: sourceId,
+    })).data
+    getchuDetails.value[key] = detail.description_preview || '该候选没有简介'
+  } catch (error) {
+    ElMessage.error((error as Error).message)
+  } finally {
+    getchuDetailLoading.value[row.anime_id] = false
+  }
+}
+
+function getchuChildFor(animeId: number) {
+  return [...getchuChildren.value]
+    .reverse()
+    .find(item => item.result?.anime_id === animeId)
+}
+
+async function enqueueGetchuRow(row: GetchuRow, notify = true) {
+  const sourceId = getchuSelections.value[row.anime_id]
+  if (!sourceId || !getchuPreviewTaskId.value) return
+  getchuConfirming.value[row.anime_id] = true
+  try {
+    await api.post(`/anime/${row.anime_id}/getchu-description-confirm`, {
+      preview_task_id: getchuPreviewTaskId.value,
+      source_id: sourceId,
+    })
+    await refreshGetchuChildren()
+    if (notify) ElMessage.success(`${row.anime_title} 已加入简介和 NFO 写入队列`)
+  } finally {
+    getchuConfirming.value[row.anime_id] = false
+  }
+}
+
+async function confirmGetchuRow(row: GetchuRow) {
+  try {
+    await enqueueGetchuRow(row)
+  } catch (error) {
+    ElMessage.error((error as Error).message)
+  }
+}
+
+function getchuRowsReadyToQueue() {
+  return getchuRows.value.filter((row) => {
+    const child = getchuChildFor(row.anime_id)
+    return row.search_status === 'ready'
+      && Boolean(getchuSelections.value[row.anime_id])
+      && !row.blockers.length
+      && !['pending', 'running', 'completed'].includes(child?.status)
+  })
+}
+
+async function beforeGetchuClose(done: () => void) {
+  if (getchuClosing.value) return
+  const waitingSearch = getchuRows.value.filter(row => ['pending', 'searching'].includes(row.search_status))
+  const missingSelection = getchuRows.value.filter((row) => {
+    const child = getchuChildFor(row.anime_id)
+    return row.search_status === 'ready'
+      && !getchuSelections.value[row.anime_id]
+      && !['pending', 'running', 'completed'].includes(child?.status)
+  })
+  if (waitingSearch.length || missingSelection.length) {
+    const details = [
+      waitingSearch.length ? `${waitingSearch.length} 部仍在搜索` : '',
+      missingSelection.length ? `${missingSelection.length} 部尚未选择候选` : '',
+    ].filter(Boolean).join('，')
+    try {
+      await ElMessageBox.alert(
+        `${details}，暂时无法全部写入。请等待搜索完成并选择候选。`,
+        '还有作品未确认',
+        { confirmButtonText: '返回选择', type: 'warning' },
+      )
+    } catch {
+      // 用户关闭提示时继续留在当前弹窗。
+    }
+    return
+  }
+
+  const rowsToQueue = getchuRowsReadyToQueue()
+  const activeCount = getchuChildren.value.filter(task => ['pending', 'running'].includes(task.status)).length
+  if (!rowsToQueue.length && !activeCount) {
+    done()
+    return
+  }
+  try {
+    await ElMessageBox.confirm(
+      `还有 ${rowsToQueue.length} 部尚未确认，${activeCount} 部正在排队或写入。是否将剩余作品全部加入写入队列？`,
+      '还有作品未写入',
+      {
+        confirmButtonText: '全部写入并关闭',
+        cancelButtonText: '取消',
+        type: 'warning',
+      },
+    )
+  } catch {
+    return
+  }
+
+  getchuClosing.value = true
+  const failures: string[] = []
+  try {
+    // 顺序创建子任务，避免关闭瞬间并发占满数据库连接池。
+    for (const row of rowsToQueue) {
+      try {
+        await enqueueGetchuRow(row, false)
+      } catch (error) {
+        failures.push(`${row.anime_title}: ${(error as Error).message}`)
+      }
+    }
+    await refreshGetchuChildren()
+    if (failures.length) {
+      ElMessage.error(`有 ${failures.length} 部未能加入队列，请查看对应行错误`)
+      return
+    }
+    if (rowsToQueue.length) ElMessage.success(`已将剩余 ${rowsToQueue.length} 部加入写入队列`)
+    done()
+  } finally {
+    getchuClosing.value = false
+  }
+}
+
+function requestGetchuClose() {
+  void beforeGetchuClose(() => { getchuOpen.value = false })
+}
+
+async function cancelGetchuRow(row: GetchuRow) {
+  if (!getchuPreviewTaskId.value) return
+  try {
+    await api.post(`/anime/${row.anime_id}/getchu-description-cancel`, {
+      preview_task_id: getchuPreviewTaskId.value,
+    })
+  } catch (error) {
+    ElMessage.error((error as Error).message)
   }
 }
 
@@ -445,7 +737,11 @@ async function writeBulkArtifacts() {
 }
 
 onMounted(load)
-onBeforeUnmount(() => bulkRenameEvents?.close())
+onBeforeUnmount(() => {
+  bulkRenameEvents?.close()
+  getchuEvents?.close()
+  if (getchuChildrenTimer) clearTimeout(getchuChildrenTimer)
+})
 </script>
 
 <template>
@@ -454,6 +750,13 @@ onBeforeUnmount(() => bulkRenameEvents?.close())
       <div><p class="eyebrow">CATALOG</p><h2>已绑定作品</h2></div>
       <div class="panel-actions">
         <span class="muted">{{ filteredItems.length }} / {{ items.length }} 部</span>
+        <el-button
+          :disabled="!getchuEligibleItems.length"
+          :loading="busy"
+          @click="startGetchuPreview()"
+        >
+          {{ getchuPreviewTaskId ? '查看 Getchu 补简介进度' : `从 Getchu 批量补简介（${getchuEligibleItems.length}）` }}
+        </el-button>
         <el-button :loading="busy" @click="previewBulkArtifacts">批量写入 NFO/主图/剧集图片</el-button>
         <el-button :loading="bulkRenameRunning" @click="previewBulkRename">全部批量重命名（仅目录不一致）</el-button>
       </div>
@@ -530,6 +833,125 @@ onBeforeUnmount(() => bulkRenameEvents?.close())
       <div v-else-if="!filteredItems.length" class="empty">没有符合当前搜索或筛选条件的作品</div>
     </div>
   </section>
+
+  <el-dialog
+    v-model="getchuOpen"
+    width="min(1180px, 97vw)"
+    title="Getchu 边搜索、边确认、边写入"
+    append-to-body
+    :before-close="beforeGetchuClose"
+  >
+    <div class="getchu-summary">
+      <el-progress :percentage="getchuSearchProgress" :status="getchuSearchStatus === 'failed' ? 'exception' : undefined" />
+      <span class="muted">{{ getchuSearchMessage }}</span>
+      <div class="getchu-counters">
+        <el-tag type="info">已确认 {{ getchuTaskSummary.confirmed }}</el-tag>
+        <el-tag type="warning">排队/写入 {{ getchuTaskSummary.queued }}</el-tag>
+        <el-tag type="success">成功 {{ getchuTaskSummary.completed }}</el-tag>
+        <el-tag type="danger">失败 {{ getchuTaskSummary.failed }}</el-tag>
+      </div>
+    </div>
+    <el-alert
+      v-if="getchuSearchStatus === 'failed'"
+      type="error"
+      :closable="false"
+      title="批量搜索任务失败；已确认的独立写入任务不受影响"
+    />
+    <el-table :data="getchuRows" row-key="anime_id" size="small" max-height="650">
+      <el-table-column prop="anime_title" label="作品" min-width="190" show-overflow-tooltip>
+        <template #default="{ row }">
+          <b>{{ row.anime_title }}</b>
+          <div class="muted getchu-keyword">{{ row.search_keyword }}</div>
+        </template>
+      </el-table-column>
+      <el-table-column label="搜索" width="105">
+        <template #default="{ row }">
+          <el-tag v-if="row.search_status === 'pending'" type="info">等待搜索</el-tag>
+          <el-tag v-else-if="row.search_status === 'searching'" type="warning">搜索中</el-tag>
+          <el-tag v-else-if="row.search_status === 'ready'" type="success">可确认</el-tag>
+          <el-tag v-else-if="row.search_status === 'cancelled'" type="info">已取消</el-tag>
+          <el-tag v-else type="danger">{{ row.search_status === 'no_candidate' ? '无候选' : '失败' }}</el-tag>
+          <el-button
+            v-if="row.search_status === 'pending'"
+            text
+            type="danger"
+            size="small"
+            @click="cancelGetchuRow(row)"
+          >取消</el-button>
+        </template>
+      </el-table-column>
+      <el-table-column label="Getchu 候选" min-width="300">
+        <template #default="{ row }">
+          <el-select
+            v-if="row.candidates.length"
+            v-model="getchuSelections[row.anime_id]"
+            placeholder="请选择候选"
+            style="width:100%"
+            @change="loadGetchuDetail(row)"
+          >
+            <el-option
+              v-for="candidate in row.candidates"
+              :key="candidate.source_id"
+              :value="candidate.source_id"
+              :label="`${candidate.title} · ${candidate.year || '-'} · ${Math.round(candidate.score * 100)}%`"
+            />
+          </el-select>
+          <span v-else-if="row.error" class="getchu-error">{{ row.error.message }}</span>
+          <span v-else class="muted">候选返回后可立即确认</span>
+          <div v-if="getchuDetailLoading[row.anime_id]" class="muted">正在加载简介…</div>
+          <div v-else-if="getchuDetailText(row)" class="getchu-description-preview">
+            {{ getchuDetailText(row) }}
+          </div>
+        </template>
+      </el-table-column>
+      <el-table-column label="NFO" width="150">
+        <template #default="{ row }">
+          <div>{{ row.nfo_targets.length }} 个关联 NFO</div>
+          <small class="muted">
+            更新 {{ row.nfo_targets.filter((item: any) => item.exists).length }} ·
+            新建 {{ row.nfo_targets.filter((item: any) => item.exists === false).length }}
+          </small>
+          <el-tooltip v-if="row.blockers.length" :content="row.blockers.join('；')">
+            <el-tag type="danger" size="small">存在阻塞</el-tag>
+          </el-tooltip>
+        </template>
+      </el-table-column>
+      <el-table-column label="写入状态" width="130">
+        <template #default="{ row }">
+          <template v-if="getchuChildFor(row.anime_id)">
+            <el-tag v-if="getchuChildFor(row.anime_id).status === 'completed'" type="success">已完成</el-tag>
+            <el-tag v-else-if="getchuChildFor(row.anime_id).status === 'failed'" type="danger">写入失败</el-tag>
+            <el-tag v-else type="warning">{{ getchuChildFor(row.anime_id).status === 'running' ? '写入中' : '已排队' }}</el-tag>
+            <el-tooltip v-if="getchuChildFor(row.anime_id).error" :content="getchuChildFor(row.anime_id).error.message">
+              <div class="getchu-error">查看错误</div>
+            </el-tooltip>
+          </template>
+          <span v-else class="muted">未确认</span>
+        </template>
+      </el-table-column>
+      <el-table-column label="操作" width="145" fixed="right">
+        <template #default="{ row }">
+          <el-button
+            type="primary"
+            size="small"
+            :loading="getchuConfirming[row.anime_id]"
+            :disabled="row.search_status !== 'ready' || !getchuSelections[row.anime_id] || Boolean(row.blockers.length) || ['pending', 'running', 'completed'].includes(getchuChildFor(row.anime_id)?.status)"
+            @click="confirmGetchuRow(row)"
+          >
+            确认并写入
+          </el-button>
+        </template>
+      </el-table-column>
+    </el-table>
+    <template #footer>
+      <span class="muted">确认后会备份已有 NFO，并只更新其 plot 节点</span>
+      <el-button :loading="getchuClosing" @click="requestGetchuClose">关闭</el-button>
+      <el-button
+        v-if="['completed', 'failed'].includes(getchuSearchStatus)"
+        @click="getchuPreviewTaskId = null; startGetchuPreview(true)"
+      >重新预览当前筛选</el-button>
+    </template>
+  </el-dialog>
 
   <el-dialog v-model="detailOpen" width="min(820px, 94vw)" :title="selected?.title">
     <template v-if="selected">

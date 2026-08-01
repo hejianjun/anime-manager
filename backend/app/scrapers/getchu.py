@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import re
+import time
 from typing import Any
 from urllib.parse import urlencode, urljoin
 
@@ -24,6 +26,21 @@ from .base import (
 
 GETCHU_SEARCH_URL = "https://www.getchu.com/php/nsearch.phtml"
 GETCHU_ITEM_URL = "https://www.getchu.com/item/{source_id}/"
+GETCHU_REQUEST_TIMEOUT_SECONDS = 25
+
+_request_lock: asyncio.Lock | None = None
+_request_loop: asyncio.AbstractEventLoop | None = None
+_last_request_started = 0.0
+
+
+def _limiter_lock() -> asyncio.Lock:
+    """每个事件循环使用独立锁，兼容应用重载和隔离事件循环的测试。"""
+    global _request_lock, _request_loop
+    loop = asyncio.get_running_loop()
+    if _request_lock is None or _request_loop is not loop:
+        _request_lock = asyncio.Lock()
+        _request_loop = loop
+    return _request_lock
 
 
 def _getchu_product(root: etree._Element) -> dict[str, Any]:
@@ -67,30 +84,43 @@ class GetchuScraper(Scraper):
     source = "getchu"
 
     async def _get(self, db: Session, url: str) -> tuple[httpx.Response, etree._Element]:
+        global _last_request_started
         proxy = get_setting(db, "proxy_url")
-        try:
-            async with httpx.AsyncClient(
-                proxy=proxy or None,
-                timeout=45,
-                follow_redirects=True,
-                cookies={"getchu_adalt_flag": "getchu.com"},
-                headers={
-                    "User-Agent": "AnimeManager/0.1 (local metadata client)",
-                    "Accept-Language": "ja-JP,ja;q=0.9",
-                },
-            ) as client:
-                response = await client.get(url)
-                response.raise_for_status()
-            response.encoding = "euc-jp"
-            return response, etree.HTML(response.text)
-        except (httpx.HTTPError, etree.XMLSyntaxError) as exc:
-            raise AppError(
-                "GETCHU_REQUEST_FAILED",
-                "Getchu 页面请求失败",
-                details=http_error_detail(exc),
-                retryable=True,
-                status_code=502,
-            ) from exc
+        interval = max(float(get_setting(db, "request_interval_seconds", 2.1) or 2.1), 0)
+        last_error: Exception | None = None
+        async with _limiter_lock():
+            for attempt in range(2):
+                wait_seconds = interval - (time.monotonic() - _last_request_started)
+                if wait_seconds > 0:
+                    await asyncio.sleep(wait_seconds)
+                _last_request_started = time.monotonic()
+                try:
+                    async with httpx.AsyncClient(
+                        proxy=proxy or None,
+                        timeout=GETCHU_REQUEST_TIMEOUT_SECONDS,
+                        follow_redirects=True,
+                        cookies={"getchu_adalt_flag": "getchu.com"},
+                        headers={
+                            "User-Agent": "AnimeManager/0.1 (local metadata client)",
+                            "Accept-Language": "ja-JP,ja;q=0.9",
+                        },
+                    ) as client:
+                        response = await client.get(url)
+                        response.raise_for_status()
+                    response.encoding = "euc-jp"
+                    return response, etree.HTML(response.text)
+                except (httpx.HTTPError, etree.XMLSyntaxError) as exc:
+                    last_error = exc
+                    if attempt == 0:
+                        continue
+        assert last_error is not None
+        raise AppError(
+            "GETCHU_REQUEST_FAILED",
+            "Getchu 页面请求失败",
+            details=http_error_detail(last_error),
+            retryable=True,
+            status_code=502,
+        ) from last_error
 
     async def search(self, db: Session, keyword: str) -> list[Candidate]:
         query = urlencode(
@@ -102,6 +132,7 @@ class GetchuScraper(Scraper):
                 "search": "search",
             },
             encoding="euc_jp",
+            errors="ignore",
         )
         response, root = await self._get(db, f"{GETCHU_SEARCH_URL}?{query}")
         normalized = normalize_title(keyword)
@@ -151,7 +182,14 @@ class GetchuScraper(Scraper):
         cached, metadata = cached_source_metadata(db, self.source, source_id)
         if metadata:
             return metadata
-        response, root = await self._get(db, GETCHU_ITEM_URL.format(source_id=source_id))
+        try:
+            response, root = await self._get(db, GETCHU_ITEM_URL.format(source_id=source_id))
+        except AppError as exc:
+            # An expired snapshot is still preferable to blocking confirmation
+            # when Getchu is temporarily slow or unavailable.
+            if cached is not None and exc.code == "GETCHU_REQUEST_FAILED":
+                return SourceMetadata(**cached.normalized_payload)
+            raise
         product = _getchu_product(root)
         title = str(product.get("name") or "").strip()
         if not title:

@@ -27,6 +27,9 @@ from ..schemas import (
     DescriptionCandidateOut,
     DescriptionFillRequest,
     ExportRequest,
+    GetchuDescriptionCancelRequest,
+    GetchuDescriptionPreviewRequest,
+    GetchuDescriptionTaskRequest,
     RenameRequest,
     TaskOut,
 )
@@ -34,6 +37,16 @@ from ..services.bulk_rename import (
     claim_preview_for_execution,
     run_bulk_rename_execute,
     run_bulk_rename_preview,
+)
+from ..services.getchu_descriptions import (
+    PREVIEW_KIND,
+    WRITE_KIND,
+    build_initial_rows,
+    cancel_preview_item,
+    get_candidate_detail,
+    run_getchu_description_preview,
+    run_getchu_description_write,
+    validate_preview_candidate,
 )
 from ..source_settings import enabled_scraper_names
 
@@ -92,6 +105,110 @@ def patch_anime(
     db.commit()
     db.refresh(anime)
     return anime
+
+
+@router.post("/getchu-description-preview", response_model=TaskOut, status_code=202)
+def start_getchu_description_preview(
+    payload: GetchuDescriptionPreviewRequest,
+    background: BackgroundTasks,
+    db: Session = Depends(get_db),
+):
+    if "getchu" not in enabled_scraper_names(db):
+        raise AppError("SOURCE_DISABLED", "Getchu 已在设置中停用", status_code=409)
+    requested = list(dict.fromkeys(payload.anime_ids))
+    found = db.scalars(anime_query().where(Anime.id.in_(requested))).unique().all()
+    by_id = {anime.id: anime for anime in found}
+    missing = [anime_id for anime_id in requested if anime_id not in by_id]
+    if missing:
+        raise AppError(
+            "NOT_FOUND",
+            "部分作品不存在",
+            details={"anime_ids": missing},
+            status_code=404,
+        )
+    animes = [by_id[anime_id] for anime_id in requested]
+    rows = build_initial_rows(animes)
+    task = TaskRecord(
+        kind=PREVIEW_KIND,
+        message="等待搜索 Getchu 简介",
+        result={"processed": 0, "total": len(rows), "items": rows},
+    )
+    db.add(task)
+    db.commit()
+    db.refresh(task)
+    background.add_task(run_getchu_description_preview, task.id)
+    return task
+
+
+@router.post("/{anime_id}/getchu-description-detail")
+async def getchu_description_detail(
+    anime_id: int,
+    payload: GetchuDescriptionTaskRequest,
+):
+    return await get_candidate_detail(
+        payload.preview_task_id,
+        anime_id,
+        payload.source_id,
+    )
+
+
+@router.post("/{anime_id}/getchu-description-cancel")
+async def cancel_getchu_description(
+    anime_id: int,
+    payload: GetchuDescriptionCancelRequest,
+):
+    return await cancel_preview_item(payload.preview_task_id, anime_id)
+
+
+@router.post(
+    "/{anime_id}/getchu-description-confirm",
+    response_model=TaskOut,
+    status_code=202,
+)
+def confirm_getchu_description(
+    anime_id: int,
+    payload: GetchuDescriptionTaskRequest,
+    background: BackgroundTasks,
+    db: Session = Depends(get_db),
+):
+    preview = db.get(TaskRecord, payload.preview_task_id)
+    if not preview:
+        raise AppError("NOT_FOUND", "Getchu 简介预览不存在", status_code=404)
+    validate_preview_candidate(preview, anime_id, payload.source_id)
+    children = db.scalars(
+        select(TaskRecord)
+        .where(
+            TaskRecord.parent_task_id == preview.id,
+            TaskRecord.kind == WRITE_KIND,
+        )
+        .order_by(TaskRecord.id.desc())
+    ).all()
+    existing = next(
+        (
+            task
+            for task in children
+            if (task.result or {}).get("anime_id") == anime_id
+            and task.status in {"pending", "running", "completed"}
+        ),
+        None,
+    )
+    if existing:
+        return existing
+    task = TaskRecord(
+        parent_task_id=preview.id,
+        kind=WRITE_KIND,
+        message="等待写入 Getchu 简介和 NFO",
+        result={
+            "preview_task_id": preview.id,
+            "anime_id": anime_id,
+            "source_id": payload.source_id,
+        },
+    )
+    db.add(task)
+    db.commit()
+    db.refresh(task)
+    background.add_task(run_getchu_description_write, task.id)
+    return task
 
 
 @router.post("/{anime_id}/refresh", response_model=AnimeOut)

@@ -19,6 +19,7 @@ def task_event_payload(task: TaskRecord) -> dict[str, Any]:
         }
     return {
         "id": task.id,
+        "parent_task_id": task.parent_task_id,
         "kind": task.kind,
         "status": task.status,
         "progress": task.progress,

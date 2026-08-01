@@ -182,6 +182,7 @@ class ExportHistory(Base):
 class TaskRecord(Base):
     __tablename__ = "task_record"
     id: Mapped[int] = mapped_column(primary_key=True)
+    parent_task_id: Mapped[int | None] = mapped_column(Integer, index=True)
     kind: Mapped[str] = mapped_column(String(80))
     status: Mapped[str] = mapped_column(String(40), default="pending")
     progress: Mapped[float] = mapped_column(Float, default=0)

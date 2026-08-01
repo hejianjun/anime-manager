@@ -192,7 +192,7 @@ def _atomic_write(path: Path, content: bytes, overwrite: bool) -> None:
         raise AppError("FILE_EXISTS", f"目标文件已存在: {path}", status_code=409)
     path.parent.mkdir(parents=True, exist_ok=True)
     if path.exists():
-        stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        stamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
         shutil.copy2(path, path.with_name(f"{path.name}.{stamp}.bak"))
     fd, temp_name = tempfile.mkstemp(prefix=".anime-manager-", dir=path.parent)
     try:

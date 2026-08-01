@@ -48,6 +48,7 @@ class LibraryRootOut(ORMModel):
 # 扫描、批量匹配和批量输出等后台任务的统一状态。
 class TaskOut(ORMModel):
     id: int
+    parent_task_id: int | None
     kind: str
     status: str
     # 进度约定为 0 到 1；具体统计和失败详情分别放在 result、error 中。
@@ -119,6 +120,19 @@ class DescriptionCandidateOut(BaseModel):
 class DescriptionFillRequest(BaseModel):
     source: str = Field(min_length=1, max_length=40)
     source_id: str = Field(min_length=1, max_length=200)
+
+
+class GetchuDescriptionPreviewRequest(BaseModel):
+    anime_ids: list[int] = Field(min_length=1, max_length=1000)
+
+
+class GetchuDescriptionTaskRequest(BaseModel):
+    preview_task_id: int = Field(gt=0)
+    source_id: str = Field(pattern=r"^\d+$", max_length=200)
+
+
+class GetchuDescriptionCancelRequest(BaseModel):
+    preview_task_id: int = Field(gt=0)
 
 
 # 扫描生成的待匹配分组，包含组内文件和所有来源候选。
