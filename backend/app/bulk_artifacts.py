@@ -17,7 +17,13 @@ from .description_translation import (
     description_needs_translation,
 )
 from .errors import AppError
-from .exporter import _atomic_write, _episode_nfo, _movie_nfo, _show_nfo
+from .exporter import (
+    _atomic_write,
+    _episode_nfo,
+    _movie_nfo,
+    _season_nfo,
+    _show_nfo,
+)
 from .library_paths import containing_library_path
 from .models import Anime, MediaFile, TaskRecord
 
@@ -106,6 +112,18 @@ def build_bulk_artifact_plan(animes: list[Anime]) -> dict:
                 "kind": "tvshow_nfo",
                 "path": str(common_dir / "tvshow.nfo"),
                 "_content": _show_nfo(anime),
+            })
+            anime_ids.add(anime.id)
+
+        season_nfo = common_dir / "season.nfo"
+        if not season_nfo.exists():
+            entries.append({
+                "anime_id": anime.id,
+                "anime_title": anime.title,
+                "media_id": None,
+                "kind": "season_nfo",
+                "path": str(season_nfo),
+                "_content": _season_nfo(anime, 1),
             })
             anime_ids.add(anime.id)
 

@@ -45,7 +45,17 @@ def _show_nfo(anime: Anime) -> bytes:
     return _xml_bytes(root)
 
 
-def _episode_nfo(anime: Anime, episode: str | int) -> bytes:
+def _season_nfo(anime: Anime, season: int) -> bytes:
+    root = ET.Element("season")
+    _text(root, "title", f"Season {season}")
+    _text(root, "seasonnumber", season)
+    _text(root, "plot", anime.description)
+    _text(root, "year", anime.year)
+    _text(root, "studio", anime.studio)
+    return _xml_bytes(root)
+
+
+def _episode_nfo(anime: Anime, episode: str | int, season: int = 1) -> bytes:
     root = ET.Element("episodedetails")
     episode_text = str(episode)
     fallback_number = episode_text.zfill(2) if episode_text.isdigit() else episode_text
@@ -55,7 +65,7 @@ def _episode_nfo(anime: Anime, episode: str | int) -> bytes:
     )
     _text(root, "title", title)
     _text(root, "showtitle", anime.title)
-    _text(root, "season", 1)
+    _text(root, "season", season)
     _text(root, "episode", episode)
     _text(root, "plot", anime.description)
     return _xml_bytes(root)
@@ -123,6 +133,7 @@ def build_export_plan(anime: Anime) -> dict:
         poster_dir = video.parent
     else:
         outputs.append((common_dir / "tvshow.nfo", _show_nfo(anime), "tvshow"))
+        outputs.append((common_dir / "season.nfo", _season_nfo(anime, 1), "season"))
         poster_dir = common_dir
         for media in present:
             if media.episode is None:

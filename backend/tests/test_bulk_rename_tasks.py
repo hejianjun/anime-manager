@@ -68,8 +68,8 @@ def test_bulk_rename_tasks_cache_preview_and_execute_it_once(
         preview = db.get(TaskRecord, preview_id)
         assert preview is not None
         assert preview.status == "completed"
-        assert preview.result["changed_count"] == 3
-        assert preview.result["nfo_create_count"] == 2
+        assert preview.result["changed_count"] == 2
+        assert preview.result["nfo_create_count"] == 3
         target = Path(preview.result["files"][0]["target"])
         execution = bulk_rename.claim_preview_for_execution(
             db,
@@ -96,8 +96,8 @@ def test_bulk_rename_tasks_cache_preview_and_execute_it_once(
         assert execution is not None
         assert execution.status == "completed"
         assert execution.result["moved"][0] == str(target)
-        assert len(execution.result["moved"]) == 3
-        assert len(execution.result["written_nfos"]) == 2
+        assert len(execution.result["moved"]) == 2
+        assert len(execution.result["written_nfos"]) == 3
         assert target.exists()
         assert not source.exists()
 

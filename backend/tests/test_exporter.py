@@ -28,8 +28,13 @@ def test_tvshow_plan_contains_show_and_episode_nfo(tmp_path: Path) -> None:
     anime.files = [media(root, tmp_path / "Example 01.mkv", "1")]
     plan = build_export_plan(anime)
     assert plan["mode"] == "tvshow"
-    assert [item["kind"] for item in plan["files"]] == ["tvshow", "episode"]
-    assert "<title>Episode title</title>" in plan["files"][1]["content"]
+    assert [item["kind"] for item in plan["files"]] == [
+        "tvshow",
+        "season",
+        "episode",
+    ]
+    assert "<seasonnumber>1</seasonnumber>" in plan["files"][1]["content"]
+    assert "<title>Episode title</title>" in plan["files"][2]["content"]
     assert not plan["blockers"]
 
 
@@ -49,7 +54,7 @@ def test_alphanumeric_episode_uses_anidb_title_in_nfo(tmp_path: Path) -> None:
 
     plan = build_export_plan(anime)
 
-    content = plan["files"][1]["content"]
+    content = plan["files"][2]["content"]
     assert "<title>Special title</title>" in content
     assert "<episode>S1</episode>" in content
     assert not plan["blockers"]

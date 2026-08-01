@@ -56,12 +56,13 @@ def test_bulk_artifact_plan_only_contains_missing_outputs(tmp_path: Path) -> Non
         plan = build_bulk_artifact_plan([anime])
 
         assert plan["anime_count"] == 1
-        assert plan["nfo_count"] == 2
+        assert plan["nfo_count"] == 3
         assert plan["poster_count"] == 1
         assert plan["episode_image_count"] == 1
         assert [item["kind"] for item in plan["files"]] == [
             "poster",
             "tvshow_nfo",
+            "season_nfo",
             "episode_nfo",
             "episode_image",
         ]
@@ -102,9 +103,12 @@ async def test_bulk_artifact_execution_writes_and_updates_health(
         await execute_bulk_artifact_plan(db, [anime], task)
 
         assert task.status == "completed"
-        assert len(task.result["written"]) == 4
+        assert len(task.result["written"]) == 5
         assert (tmp_path / "poster.jpg").read_bytes() == b"poster"
         assert (tmp_path / "tvshow.nfo").exists()
+        assert "<seasonnumber>1</seasonnumber>" in (
+            tmp_path / "season.nfo"
+        ).read_text(encoding="utf-8")
         assert (tmp_path / "Example.nfo").exists()
         assert (tmp_path / "Example-thumb.jpg").exists()
         assert anime.has_show_nfo is True
@@ -129,6 +133,7 @@ def test_bulk_artifact_plan_does_not_overwrite_existing_poster(tmp_path: Path) -
         media.has_nfo = True
         media.has_episode_image = True
         (tmp_path / "poster.jpg").write_bytes(b"existing")
+        (tmp_path / "season.nfo").write_text("<season />", encoding="utf-8")
         db.commit()
 
         plan = build_bulk_artifact_plan([anime])

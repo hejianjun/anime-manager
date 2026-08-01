@@ -94,6 +94,7 @@ const renameKindLabels: Record<string, string> = {
 }
 const artifactKindLabels: Record<string, string> = {
   tvshow_nfo: '作品 NFO',
+  season_nfo: '季 NFO',
   episode_nfo: '剧集 NFO',
   movie_nfo: '电影 NFO',
   poster: '作品主图',

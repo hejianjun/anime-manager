@@ -15,7 +15,7 @@ from sqlalchemy.orm import Session
 
 from .errors import AppError
 from .episode_numbers import episode_filename_code, episode_sort_key
-from .exporter import _episode_nfo, _movie_nfo, _show_nfo
+from .exporter import _episode_nfo, _movie_nfo, _season_nfo, _show_nfo
 from .library_paths import configured_library_paths, containing_library_path
 from .models import Anime, MatchGroup, MediaFile, ScrapeHistory
 from .parser import parse_filename
@@ -489,6 +489,11 @@ def _add_remaining_sidecar_entries(
         context.source_roots,
     )
     for entry in entries:
+        if entry["kind"] == "nfo":
+            entry["nfo_scope"] = {
+                "tvshow.nfo": "tvshow",
+                "season.nfo": "season",
+            }.get(Path(entry["source"]).name.casefold())
         _append_rename_entry(
             state.files,
             state.targets,
@@ -509,11 +514,12 @@ def _append_generated_nfo(
     episode: str | int | None = None,
     episode_title: str | None = None,
     can_generate: bool = True,
+    track_existing: bool = False,
 ) -> None:
     """把执行前需要补写的 NFO 登记为文件计划，缓存 XML 内容并禁止覆盖。"""
     source = source.absolute()
     target = target.absolute()
-    if source.exists():
+    if source.exists() and not (track_existing and source == target):
         return
     planned_target_exists = target.exists()
     _append_rename_entry(
@@ -542,10 +548,35 @@ def _append_generated_nfo(
         state.files[-1]["changed"] = False
 
 
+def _add_directory_nfo_requirement(
+    context: _RenamePlanContext,
+    state: _RenamePlanState,
+    *,
+    filename: str,
+    nfo_scope: str,
+) -> None:
+    """作品级 NFO 直接预写最终目录，不依赖来源下载目录是否独占。"""
+    target = context.target_dir / filename
+    # 独占源目录中已有的同名 NFO 会作为 sidecar 搬到目标，不重复生成。
+    if any(
+        item["kind"] == "nfo" and Path(item["target"]) == target
+        for item in state.files
+    ):
+        return
+    _append_generated_nfo(
+        context,
+        state,
+        source=target,
+        target=target,
+        nfo_scope=nfo_scope,
+        media_id=None,
+        track_existing=True,
+    )
+
+
 def _add_missing_nfo_entries(
     context: _RenamePlanContext,
     state: _RenamePlanState,
-    exclusive_dirs: set[Path],
 ) -> list[str]:
     """规划重命名前缺失的 Jellyfin NFO，并拒绝污染共享作品目录。"""
     nfo_blockers: list[str] = []
@@ -575,38 +606,18 @@ def _add_missing_nfo_entries(
             )
         return nfo_blockers
 
-    media_parents = [Path(item.path).absolute().parent for item in context.present]
-    common_dir = Path(os.path.commonpath([str(path) for path in media_parents])).absolute()
-    show_source = common_dir / "tvshow.nfo"
-    show_target = context.target_dir / "tvshow.nfo"
-    show_dir_is_safe = (
-        common_dir == context.target_dir
-        or common_dir in exclusive_dirs
+    _add_directory_nfo_requirement(
+        context,
+        state,
+        filename="tvshow.nfo",
+        nfo_scope="tvshow",
     )
-    if not show_dir_is_safe:
-        if not show_target.exists():
-            nfo_blockers.append(
-                f"作品目录可能与其他作品共享，无法安全写入或迁移 tvshow.nfo: {common_dir}"
-            )
-        elif not show_source.exists():
-            _append_generated_nfo(
-                context,
-                state,
-                source=show_source,
-                target=show_target,
-                nfo_scope="tvshow",
-                media_id=None,
-                can_generate=False,
-            )
-    elif not show_source.exists():
-        _append_generated_nfo(
-            context,
-            state,
-            source=show_source,
-            target=show_target,
-            nfo_scope="tvshow",
-            media_id=None,
-        )
+    _add_directory_nfo_requirement(
+        context,
+        state,
+        filename="season.nfo",
+        nfo_scope="season",
+    )
 
     for media in context.present:
         if media.episode is None:
@@ -653,7 +664,7 @@ def build_rename_plan(anime: Anime, season: int = 1) -> dict:
         context.source_roots,
     )
     _add_remaining_sidecar_entries(context, state, exclusive_dirs)
-    nfo_blockers = _add_missing_nfo_entries(context, state, exclusive_dirs)
+    nfo_blockers = _add_missing_nfo_entries(context, state)
 
     cleanup_dirs, cleanup_blockers = _cleanup_directory_plan(
         exclusive_dirs,
@@ -1010,10 +1021,16 @@ def _prepare_generated_nfos(
                     )
                 if item["nfo_scope"] == "tvshow":
                     content = _show_nfo(anime)
+                elif item["nfo_scope"] == "season":
+                    content = _season_nfo(anime, execution_plan["season"])
                 elif item["nfo_scope"] == "movie":
                     content = _movie_nfo(anime)
                 else:
-                    content = _episode_nfo(anime, item["episode"])
+                    content = _episode_nfo(
+                        anime,
+                        item["episode"],
+                        execution_plan["season"],
+                    )
                 if _write_missing_nfo(source, content.decode("utf-8")):
                     written.append(item)
                     if progress_callback:
@@ -1057,12 +1074,14 @@ def _rename_file_priority(item: dict) -> tuple[int, str]:
     """NFO 必须先于视频到达 NAS，其他 sidecar 保持在视频之前。"""
     if item["kind"] == "nfo" and item.get("nfo_scope") == "tvshow":
         priority = 0
-    elif item["kind"] == "nfo":
+    elif item["kind"] == "nfo" and item.get("nfo_scope") == "season":
         priority = 1
-    elif item["kind"] == "video":
-        priority = 3
-    else:
+    elif item["kind"] == "nfo":
         priority = 2
+    elif item["kind"] == "video":
+        priority = 4
+    else:
+        priority = 3
     return priority, item["target"].casefold()
 
 

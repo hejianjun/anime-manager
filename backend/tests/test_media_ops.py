@@ -170,9 +170,9 @@ def test_rename_plan_and_execute_move_files(tmp_path: Path) -> None:
         db.commit()
         db.refresh(anime)
 
-        plan = build_rename_plan(anime, 1)
+        plan = build_rename_plan(anime, 2)
         assert plan["blockers"] == []
-        assert plan["nfo_create_count"] == 2
+        assert plan["nfo_create_count"] == 3
         assert plan["cleanup_dirs"] == [
             {
                 "source": str(source.parent.resolve()),
@@ -180,9 +180,9 @@ def test_rename_plan_and_execute_move_files(tmp_path: Path) -> None:
                 "changed": True,
             }
         ]
-        assert plan["files"][0]["target"].endswith("作品名 - S01E03 - 公式集标题.mp4")
+        assert plan["files"][0]["target"].endswith("作品名 - S02E03 - 公式集标题.mp4")
 
-        result = execute_rename_plan(db, anime, 1)
+        result = execute_rename_plan(db, anime, 2)
 
         target = Path(result["moved"][0])
         assert target.exists()
@@ -191,8 +191,14 @@ def test_rename_plan_and_execute_move_files(tmp_path: Path) -> None:
         assert media.relative_path == str(target.relative_to(tmp_path))
         assert media.has_nfo is True
         assert anime.has_show_nfo is True
-        assert len(result["written_nfos"]) == 2
+        assert len(result["written_nfos"]) == 3
         assert (target.parent / "tvshow.nfo").exists()
+        assert "<seasonnumber>2</seasonnumber>" in (
+            target.parent / "season.nfo"
+        ).read_text(encoding="utf-8")
+        assert "<season>2</season>" in target.with_suffix(".nfo").read_text(
+            encoding="utf-8"
+        )
         assert target.with_suffix(".nfo").exists()
 
 
@@ -274,6 +280,7 @@ def test_rename_preserves_shared_directory_and_other_anime_files(
         target_dir = tmp_path / "作品一"
         target_dir.mkdir()
         (target_dir / "tvshow.nfo").write_text("<tvshow />", encoding="utf-8")
+        (target_dir / "season.nfo").write_text("<season />", encoding="utf-8")
         first_media = add_media(db, root, first_source, 1)
         second_media = add_media(db, root, second_source, 1)
         first_media.anime_id = first_anime.id
@@ -286,7 +293,8 @@ def test_rename_preserves_shared_directory_and_other_anime_files(
         assert plan["blockers"] == []
         assert [Path(item["source"]) for item in plan["files"]] == [
             first_source,
-            shared / "tvshow.nfo",
+            target_dir / "tvshow.nfo",
+            target_dir / "season.nfo",
             first_source.with_suffix(".nfo"),
         ]
         assert plan["cleanup_dirs"] == []
@@ -333,6 +341,7 @@ def test_rename_moves_and_renames_video_sidecars(tmp_path: Path) -> None:
         directory_sidecars = {
             source.parent / "poster.jpg": b"poster",
             source.parent / "tvshow.nfo": b"tvshow",
+            source.parent / "season.nfo": b"season",
             source.parent / "metadata" / "artwork.jpg": b"metadata artwork",
         }
         for path, content in directory_sidecars.items():
@@ -353,6 +362,7 @@ def test_rename_moves_and_renames_video_sidecars(tmp_path: Path) -> None:
             "image",
             "nfo",
             "nfo",
+            "nfo",
             "subtitle",
             "subtitle",
             "subtitle",
@@ -370,12 +380,13 @@ def test_rename_moves_and_renames_video_sidecars(tmp_path: Path) -> None:
             "作品名 - S01E01-thumb.jpg",
             "poster.jpg",
             "tvshow.nfo",
+            "season.nfo",
             "artwork.jpg",
         }
 
         result = execute_rename_plan(db, anime, 1)
 
-        assert len(result["moved"]) == 11
+        assert len(result["moved"]) == 12
         assert all(Path(path).exists() for path in result["moved"])
         assert all(not path.exists() for path in [source, *sidecars])
         assert all(not path.exists() for path in directory_sidecars)
@@ -460,18 +471,18 @@ def test_bulk_rename_preview_and_execute_all_anime(tmp_path: Path) -> None:
 
         plan = build_bulk_rename_plan([first, second], 1)
         assert plan["anime_count"] == 2
-        assert plan["changed_count"] == 6
-        assert plan["nfo_create_count"] == 4
+        assert plan["changed_count"] == 4
+        assert plan["nfo_create_count"] == 6
         assert plan["blockers"] == []
         assert {item["anime_title"] for item in plan["files"]} == {"作品一", "作品二"}
 
         result = execute_bulk_rename_plan(db, [first, second], 1)
 
         assert result["anime_count"] == 2
-        assert len(result["moved"]) == 6
+        assert len(result["moved"]) == 4
         assert all(Path(path).exists() for path in result["moved"])
         assert len(result["archived_dirs"]) == 2
-        assert len(result["written_nfos"]) == 4
+        assert len(result["written_nfos"]) == 6
         assert not first_source.exists()
         assert not second_source.exists()
         assert not first_source.parent.exists()
@@ -726,10 +737,9 @@ def test_bulk_rename_moves_scan_directory_media_into_main_directory(
         assert media.relative_path == str(target.relative_to(main_dir))
         assert result["moved"][0] == str(target.absolute())
         assert set(result["moved"][1:]) == {
-            str((main_dir / "Example" / "tvshow.nfo").absolute()),
             str(target.with_suffix(".nfo").absolute()),
         }
-        assert len(result["written_nfos"]) == 2
+        assert len(result["written_nfos"]) == 3
         assert (main_dir / ".delete" / "Example").is_dir()
 
 
@@ -787,6 +797,7 @@ def test_rename_moves_nfo_before_video(tmp_path: Path, monkeypatch: pytest.Monke
             target = Path(target_path)
             if target.suffix == ".mkv":
                 assert (target.parent / "tvshow.nfo").exists()
+                assert (target.parent / "season.nfo").exists()
                 assert target.with_suffix(".nfo").exists()
             return original_move(source_path, target_path)
 
@@ -808,6 +819,7 @@ def test_existing_nfos_are_preserved_without_overwrite(tmp_path: Path) -> None:
         source.write_bytes(b"video")
         source.with_suffix(".nfo").write_text("existing episode", encoding="utf-8")
         (source.parent / "tvshow.nfo").write_text("existing show", encoding="utf-8")
+        (source.parent / "season.nfo").write_text("existing season", encoding="utf-8")
         media = add_media(db, root, source, 1)
         media.anime_id = anime.id
         db.commit()
@@ -820,6 +832,7 @@ def test_existing_nfos_are_preserved_without_overwrite(tmp_path: Path) -> None:
 
         target_dir = tmp_path / "保留 NFO"
         assert (target_dir / "tvshow.nfo").read_text(encoding="utf-8") == "existing show"
+        assert (target_dir / "season.nfo").read_text(encoding="utf-8") == "existing season"
         assert (
             target_dir / "保留 NFO - S01E01.nfo"
         ).read_text(encoding="utf-8") == "existing episode"
@@ -845,12 +858,15 @@ def test_bulk_rename_accepts_nfo_created_after_preview(tmp_path: Path) -> None:
         target_dir = tmp_path / "竞态测试"
         target_dir.mkdir()
         (target_dir / "tvshow.nfo").write_text("nas show", encoding="utf-8")
+        target_season = target_dir / "season.nfo"
+        target_season.write_text("nas season", encoding="utf-8")
         target_episode = target_dir / "竞态测试 - S01E01.nfo"
         target_episode.write_text("nas episode", encoding="utf-8")
 
         result = execute_cached_bulk_rename_plan(db, plan)
 
         assert (target_dir / "tvshow.nfo").read_text(encoding="utf-8") == "nas show"
+        assert target_season.read_text(encoding="utf-8") == "nas season"
         assert target_episode.read_text(encoding="utf-8") == "nas episode"
         assert result["written_nfos"] == []
         assert (target_dir / "竞态测试 - S01E01.mkv").exists()
@@ -874,8 +890,10 @@ def test_bulk_rename_regenerates_target_nfo_removed_after_preview(
         target_dir = tmp_path / "目标删除竞态"
         target_dir.mkdir()
         target_show = target_dir / "tvshow.nfo"
+        target_season = target_dir / "season.nfo"
         target_episode = target_dir / "目标删除竞态 - S01E01.nfo"
         target_show.write_text("temporary show", encoding="utf-8")
+        target_season.write_text("temporary season", encoding="utf-8")
         target_episode.write_text("temporary episode", encoding="utf-8")
         db.commit()
         db.refresh(anime)
@@ -883,12 +901,14 @@ def test_bulk_rename_regenerates_target_nfo_removed_after_preview(
         plan = build_bulk_rename_plan([anime], 1)
         assert plan["nfo_create_count"] == 0
         target_show.unlink()
+        target_season.unlink()
         target_episode.unlink()
 
         result = execute_cached_bulk_rename_plan(db, plan)
 
-        assert len(result["written_nfos"]) == 2
+        assert len(result["written_nfos"]) == 3
         assert target_show.exists()
+        assert target_season.exists()
         assert target_episode.exists()
         assert (target_dir / "目标删除竞态 - S01E01.mkv").exists()
 
@@ -923,7 +943,10 @@ def test_bulk_nfo_failure_skips_only_affected_anime(
         original_write = media_ops._write_missing_nfo
 
         def fail_episode_nfo(path: Path, content: str) -> bool:
-            if path.parent == failed_source.parent and path.name != "tvshow.nfo":
+            if (
+                path.parent == failed_source.parent
+                and path.name not in {"tvshow.nfo", "season.nfo"}
+            ):
                 raise OSError("simulated NFO failure")
             return original_write(path, content)
 
@@ -934,13 +957,14 @@ def test_bulk_nfo_failure_skips_only_affected_anime(
         assert result["anime_count"] == 1
         assert any(item["anime_id"] == failed.id for item in result["skipped"])
         assert failed_source.exists()
-        assert (failed_source.parent / "tvshow.nfo").exists()
+        assert (tmp_path / "失败作品" / "tvshow.nfo").exists()
+        assert (tmp_path / "失败作品" / "season.nfo").exists()
         assert not (tmp_path / "失败作品" / "失败作品 - S01E01.mkv").exists()
         assert not succeeded_source.exists()
         assert (tmp_path / "成功作品" / "成功作品 - S01E01.mkv").exists()
 
 
-def test_shared_tv_directory_without_target_nfo_is_blocked(tmp_path: Path) -> None:
+def test_shared_tv_directory_writes_show_nfos_directly_to_target(tmp_path: Path) -> None:
     engine = create_engine("sqlite:///:memory:")
     Base.metadata.create_all(engine)
     with Session(engine) as db:
@@ -961,5 +985,15 @@ def test_shared_tv_directory_without_target_nfo_is_blocked(tmp_path: Path) -> No
 
         plan = build_rename_plan(anime, 1)
 
-        assert any("共享" in blocker and "tvshow.nfo" in blocker for blocker in plan["blockers"])
+        assert plan["blockers"] == []
         assert not (shared / "tvshow.nfo").exists()
+        assert not (shared / "season.nfo").exists()
+
+        execute_rename_plan(db, anime, 1)
+
+        target = tmp_path / "共享目录作品"
+        assert (target / "tvshow.nfo").exists()
+        assert (target / "season.nfo").exists()
+        assert (target / "共享目录作品 - S01E01.nfo").exists()
+        assert (target / "共享目录作品 - S01E01.mkv").exists()
+        assert other.exists()
