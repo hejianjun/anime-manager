@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict
+from typing import Any, Awaitable, Callable
 
 from sqlalchemy import delete, select, tuple_
 from sqlalchemy.orm import Session
@@ -19,6 +20,26 @@ from .models import (
 from .scrapers import SCRAPERS, Candidate, SourceMetadata
 
 DESCRIPTION_SOURCES = {"anidb", "getchu"}
+SearchProgressCallback = Callable[[int, int, str], Awaitable[None]]
+
+
+async def _search_source(
+    bind: Any,
+    source: str,
+    keyword: str,
+) -> tuple[str, list[Candidate] | None, dict | None]:
+    """Use an isolated Session for one scraper so searches can safely overlap."""
+    scraper = SCRAPERS[source]
+    with Session(bind=bind, autoflush=False, expire_on_commit=False) as search_db:
+        try:
+            return source, await scraper.search(search_db, keyword), None
+        except AppError as exc:
+            return source, None, {
+                "source": source,
+                "code": exc.code,
+                "message": exc.message,
+                "details": exc.details,
+            }
 
 
 def _selected_group_files(
@@ -36,23 +57,43 @@ def _selected_group_files(
 
 
 async def search_group(
-    db: Session, group: MatchGroup, keyword: str, sources: list[str]
+    db: Session,
+    group: MatchGroup,
+    keyword: str,
+    sources: list[str],
+    progress_callback: SearchProgressCallback | None = None,
 ) -> tuple[list[ScrapeCandidate], list[dict]]:
     group.search_keyword = keyword
     errors: list[dict] = []
     results: list[ScrapeCandidate] = []
+
+    searchable_sources: list[str] = []
     for source in sources:
-        scraper = SCRAPERS.get(source)
-        if not scraper:
+        if source not in SCRAPERS:
             errors.append({"source": source, "code": "UNKNOWN_SOURCE", "message": "未知数据源"})
             continue
-        try:
-            found = await scraper.search(db, keyword)
-        except AppError as exc:
-            errors.append(
-                {"source": source, "code": exc.code, "message": exc.message, "details": exc.details}
-            )
+        searchable_sources.append(source)
+
+    # Run sources one at a time so progress can name the active source. Each
+    # scraper still gets its own Session: AniDB may initialize title tables and
+    # all network scrapers read settings, so they must not commit or retain the
+    # request Session while waiting on remote I/O.
+    total = len(searchable_sources)
+    search_results: list[tuple[str, list[Candidate]]] = []
+    for index, source in enumerate(searchable_sources):
+        if progress_callback:
+            await progress_callback(index, total, source)
+        source, found, error = await _search_source(db.get_bind(), source, keyword)
+        if error:
+            errors.append(error)
             continue
+        assert found is not None
+        search_results.append((source, found))
+
+    # Do not open the candidate write transaction until every progress update
+    # has been published through its own short Session. This avoids making the
+    # SSE status writer wait behind SQLite's single active writer.
+    for source, found in search_results:
         db.execute(
             delete(ScrapeCandidate).where(
                 ScrapeCandidate.match_group_id == group.id,

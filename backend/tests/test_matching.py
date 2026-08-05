@@ -1,5 +1,5 @@
 from sqlalchemy import create_engine
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, sessionmaker
 
 from app.database import Base
 from app.errors import AppError
@@ -8,6 +8,7 @@ from app.matching import (
     _apply_metadata,
     confirm_group,
     fill_missing_description,
+    search_group,
     search_description_candidates,
 )
 from app.models import (
@@ -21,6 +22,7 @@ from app.models import (
 )
 from app.schemas import BulkSearchConfirmRequest
 from app.scrapers import SCRAPERS, Candidate, SourceMetadata
+from app.services.group_search import run_group_search
 
 
 class StubScraper:
@@ -71,6 +73,130 @@ class DescriptionStub:
             title="商品标题",
             description="作品の紹介文です。",
         )
+
+
+class ProgressSearchStub:
+    def __init__(
+        self,
+        source: str,
+        sessions: list[Session],
+    ) -> None:
+        self.source = source
+        self.sessions = sessions
+
+    async def search(self, db: Session, keyword: str) -> list[Candidate]:
+        self.sessions.append(db)
+        return [
+            Candidate(
+                source=self.source,
+                source_id=f"{self.source}-1",
+                title=f"{keyword} {self.source}",
+                score=1,
+            )
+        ]
+
+
+async def test_search_group_reports_each_source_and_uses_isolated_sessions(
+    monkeypatch,
+) -> None:
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    search_sessions: list[Session] = []
+    progress: list[tuple[int, int, str]] = []
+    monkeypatch.setitem(
+        SCRAPERS,
+        "anidb",
+        ProgressSearchStub("anidb", search_sessions),
+    )
+    monkeypatch.setitem(
+        SCRAPERS,
+        "getchu",
+        ProgressSearchStub("getchu", search_sessions),
+    )
+
+    with Session(engine) as db:
+        root = LibraryRoot(path="library")
+        db.add(root)
+        db.flush()
+        group = MatchGroup(
+            library_root_id=root.id,
+            group_key="concurrent",
+            display_title="Concurrent",
+            search_keyword="old keyword",
+        )
+        db.add(group)
+        db.commit()
+
+        async def record_progress(completed: int, total: int, source: str) -> None:
+            progress.append((completed, total, source))
+
+        candidates, errors = await search_group(
+            db,
+            group,
+            "new keyword",
+            ["anidb", "getchu"],
+            record_progress,
+        )
+
+        assert errors == []
+        assert progress == [(0, 2, "anidb"), (1, 2, "getchu")]
+        assert [item.source for item in candidates] == ["anidb", "getchu"]
+        assert len(search_sessions) == 2
+        assert search_sessions[0] is not search_sessions[1]
+        assert all(search_db is not db for search_db in search_sessions)
+        assert group.search_keyword == "new keyword"
+        assert db.query(ScrapeCandidate).count() == 2
+
+
+async def test_group_search_task_persists_results_and_terminal_progress(monkeypatch) -> None:
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    search_sessions: list[Session] = []
+    monkeypatch.setitem(SCRAPERS, "anidb", ProgressSearchStub("anidb", search_sessions))
+    monkeypatch.setitem(SCRAPERS, "getchu", ProgressSearchStub("getchu", search_sessions))
+    factory = sessionmaker(bind=engine)
+
+    with factory() as db:
+        root = LibraryRoot(path="library")
+        db.add(root)
+        db.flush()
+        group = MatchGroup(
+            library_root_id=root.id,
+            group_key="background",
+            display_title="Background",
+            search_keyword="old keyword",
+        )
+        task = TaskRecord(
+            kind="match_group_search",
+            message="等待候选搜索",
+            result={"group_id": 0, "candidate_count": 0, "errors": []},
+        )
+        db.add_all([group, task])
+        db.commit()
+        group_id = group.id
+        task_id = task.id
+
+    await run_group_search(
+        task_id,
+        group_id,
+        "background keyword",
+        ["anidb", "getchu"],
+        session_factory=factory,
+    )
+
+    with factory() as db:
+        task = db.get(TaskRecord, task_id)
+        group = db.get(MatchGroup, group_id)
+        assert task.status == "completed"
+        assert task.progress == 1
+        assert task.message == "候选搜索完成，共找到 2 条"
+        assert task.result == {
+            "group_id": group_id,
+            "candidate_count": 2,
+            "errors": [],
+        }
+        assert group.search_keyword == "background keyword"
+        assert db.query(ScrapeCandidate).count() == 2
 
 
 def test_getchu_only_supplements_anidb_metadata() -> None:

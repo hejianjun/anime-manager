@@ -4,7 +4,7 @@ from sqlalchemy.orm import Session, selectinload
 
 from ..database import get_db
 from ..errors import AppError
-from ..matching import confirm_group, save_selections, search_group
+from ..matching import confirm_group, save_selections
 from ..media_ops import bind_group_to_anime
 from ..models import Anime, MatchGroup, MediaFile, TaskRecord
 from ..queries import anime_query, group_query
@@ -21,6 +21,7 @@ from ..schemas import (
 )
 from ..scrapers import SCRAPERS
 from ..services.bulk_matching import run_bulk_search_confirm
+from ..services.group_search import run_group_search
 from ..source_settings import enabled_scraper_names
 
 router = APIRouter(prefix="/api/match-groups", tags=["matching"])
@@ -119,10 +120,15 @@ def patch_group(
     return group
 
 
-@router.post("/{group_id}/search")
-async def run_search(
+@router.post(
+    "/{group_id}/search",
+    response_model=TaskOut,
+    status_code=202,
+)
+def run_search(
     group_id: int,
     payload: SearchRequest,
+    background: BackgroundTasks,
     db: Session = Depends(get_db),
 ):
     group = db.get(MatchGroup, group_id)
@@ -131,13 +137,7 @@ async def run_search(
     enabled = enabled_scraper_names(db)
     requested = payload.sources if payload.sources is not None else enabled
     sources = [source for source in requested if source in enabled]
-    results, errors = await search_group(
-        db,
-        group,
-        payload.keyword or group.search_keyword,
-        sources,
-    )
-    errors.extend(
+    errors = [
         {
             "source": source,
             "code": "UNKNOWN_SOURCE",
@@ -145,7 +145,7 @@ async def run_search(
         }
         for source in requested
         if source not in SCRAPERS
-    )
+    ]
     errors.extend(
         {
             "source": source,
@@ -155,24 +155,24 @@ async def run_search(
         for source in requested
         if source in SCRAPERS and source not in enabled
     )
-    return {
-        "items": [
-            {
-                "id": item.id,
-                "source": item.source,
-                "source_id": item.source_id,
-                "title": item.title,
-                "year": item.year,
-                "episode_count": item.episode_count,
-                "cover_url": item.cover_url,
-                "score": item.score,
-                "selected": item.selected,
-                "is_mock": item.is_mock,
-            }
-            for item in results
-        ],
-        "errors": errors,
-    }
+    keyword = payload.keyword or group.search_keyword
+    task = TaskRecord(
+        kind="match_group_search",
+        message="等待候选搜索",
+        result={"group_id": group_id, "candidate_count": 0, "errors": errors},
+    )
+    db.add(task)
+    db.commit()
+    db.refresh(task)
+    background.add_task(
+        run_group_search,
+        task.id,
+        group_id,
+        keyword,
+        sources,
+        errors,
+    )
+    return task
 
 
 @router.put("/{group_id}/selections", response_model=MatchGroupOut)

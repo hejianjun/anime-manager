@@ -7,6 +7,8 @@ import { groupCandidates, matchesMatchGroupSearch } from '../utils'
 const groups = ref<MatchGroup[]>([])
 const active = ref<MatchGroup | null>(null)
 const searching = ref(false)
+const searchProgress = ref(0)
+const searchTaskText = ref('')
 const bulkSearching = ref(false)
 const bulkProgress = ref(0)
 const bulkTaskText = ref('')
@@ -23,6 +25,7 @@ const coverErrors = ref<Record<number, boolean>>({})
 const playerOpen = ref(false)
 const playerFile = ref<MediaFile | null>(null)
 let bulkEvents: EventSource | null = null
+let searchEvents: EventSource | null = null
 const bySource = computed(() => groupCandidates(active.value?.candidates || [], sources.value))
 const playerUrl = computed(() => playerFile.value ? `/api/media-files/${playerFile.value.id}/stream` : '')
 const filteredGroups = computed(() =>
@@ -120,21 +123,65 @@ async function bindExisting() {
 
 async function search() {
   if (!active.value || !selectedFileIds.value.length) return
+  const groupId = active.value.id
   searching.value = true
+  searchProgress.value = 0
+  searchTaskText.value = '正在启动候选搜索'
   try {
-    await api.patch(`/match-groups/${active.value.id}`, { search_keyword: keyword.value })
-    const response = await api.post(`/match-groups/${active.value.id}/search`, {
+    await api.patch(`/match-groups/${groupId}`, { search_keyword: keyword.value })
+    const task = (await api.post(`/match-groups/${groupId}/search`, {
       keyword: keyword.value,
       sources: sources.value,
-    })
-    active.value.candidates = response.data.items
-    selections.value = { anidb: null, dmm: null, getchu: null }
-    if (response.data.errors.length) {
-      ElMessage.warning(response.data.errors.map((item: any) => `${item.source}: ${item.message}`).join('；'))
+    })).data
+    const current = await waitForSearchTask(task.id)
+    const refreshed: MatchGroup = (await api.get(`/match-groups/${groupId}`)).data
+    const index = groups.value.findIndex(group => group.id === groupId)
+    if (index >= 0) groups.value[index] = refreshed
+    if (active.value?.id === groupId) {
+      active.value = refreshed
+      selections.value = { anidb: null, dmm: null, getchu: null }
+    }
+    const errors = current.result?.errors || []
+    if (errors.length) {
+      ElMessage.warning(errors.map((item: any) => `${item.source}: ${item.message}`).join('；'))
     } else ElMessage.success('候选已更新')
   } catch (error) {
     ElMessage.error((error as Error).message)
-  } finally { searching.value = false }
+  } finally {
+    searching.value = false
+    if (searchProgress.value < 100) searchTaskText.value = ''
+  }
+}
+
+function waitForSearchTask(taskId: number): Promise<any> {
+  return new Promise((resolve, reject) => {
+    searchEvents?.close()
+    const events = new EventSource(`/api/tasks/${taskId}/events`)
+    searchEvents = events
+    events.onmessage = (event) => {
+      try {
+        const current = JSON.parse(event.data)
+        searchProgress.value = Math.round(current.progress * 100)
+        searchTaskText.value = current.message
+        if (current.status === 'completed') {
+          events.close()
+          searchEvents = null
+          resolve(current)
+        } else if (current.status === 'failed') {
+          events.close()
+          searchEvents = null
+          reject(new Error(current.error?.message || '候选搜索失败'))
+        }
+      } catch (error) {
+        events.close()
+        searchEvents = null
+        reject(error)
+      }
+    }
+    events.onerror = () => {
+      searchTaskText.value = '实时进度连接中断，正在自动重连'
+    }
+  })
 }
 
 function waitForBulkTask(taskId: number): Promise<any> {
@@ -222,7 +269,10 @@ async function confirm() {
 }
 
 onMounted(() => Promise.all([loadGroups(), loadAnime(), loadSettings()]))
-onBeforeUnmount(() => bulkEvents?.close())
+onBeforeUnmount(() => {
+  bulkEvents?.close()
+  searchEvents?.close()
+})
 </script>
 
 <template>
@@ -282,6 +332,13 @@ onBeforeUnmount(() => bulkEvents?.close())
         <div class="toolbar">
           <el-input v-model="keyword" placeholder="搜索关键词" @keyup.enter="search" />
           <el-button type="primary" :loading="searching" :disabled="!sources.length || !selectedFileIds.length" @click="search">搜索已启用来源</el-button>
+        </div>
+        <div v-if="searching || searchTaskText" class="bulk-match-progress">
+          <el-progress
+            :percentage="searchProgress"
+            :status="searchProgress === 100 ? 'success' : undefined"
+          />
+          <span class="muted">{{ searchTaskText }}</span>
         </div>
         <el-alert v-if="!sources.length" type="warning" :closable="false" title="当前未启用任何爬虫，请先到设置页选择。" />
         <div class="source-section">
