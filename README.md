@@ -150,29 +150,54 @@ sequenceDiagram
 
 ## 后端结构
 
-后端使用 FastAPI，并按 HTTP 接口、应用编排和基础设施职责分层：
+后端使用 FastAPI，并按应用入口、HTTP 接口、业务能力、后台流程和基础设施分层：
 
 ```text
 backend/app/
-├─ main.py                 # 创建 FastAPI 应用、注册中间件、异常处理和路由
-├─ lifecycle.py            # 数据库初始化、启动清理和定时刷新任务
-├─ task_events.py          # 后台任务的 SSE 事件发布与订阅
-├─ queries.py              # 作品和匹配分组的公共 SQLAlchemy 查询
-├─ source_settings.py      # 数据源开关及默认设置
-├─ routers/                # 按 API 资源划分的 APIRouter
-│  ├─ system.py            # 健康检查和仪表盘
-│  ├─ libraries.py         # 媒体库及扫描任务
-│  ├─ tasks.py             # 后台任务查询和进度事件
-│  ├─ media.py             # 媒体文件维护和播放
-│  ├─ matching.py          # 候选搜索、选择和确认
-│  ├─ anime.py             # 作品、重命名及 NFO/图片输出
-│  ├─ settings.py          # 应用设置
-│  └─ sources.py           # AniDB 与 Getchu 来源接口
-└─ services/
-   └─ bulk_matching.py     # 批量搜索并确认的业务编排
+├─ main.py                    # 创建 FastAPI 应用并注册中间件、异常处理和路由
+├─ lifecycle.py               # 数据库初始化、启动清理和定时元数据刷新
+├─ routers/                   # HTTP 接口层：参数、依赖、状态码和响应模型
+│  ├─ system.py               # 健康检查和仪表盘
+│  ├─ libraries.py            # 媒体库配置及扫描任务
+│  ├─ tasks.py                # 后台任务查询和 SSE 进度事件
+│  ├─ media.py                # 媒体文件维护和播放
+│  ├─ matching.py             # 匹配分组的搜索、选择、确认和作品绑定接口
+│  ├─ anime.py                # 作品维护、元数据及重命名/NFO 输出接口
+│  ├─ settings.py             # 应用设置接口
+│  └─ sources.py              # AniDB、Getchu 等数据源接口
+├─ services/                  # 长耗时后台流程及跨业务模块编排
+│  ├─ group_search.py         # 单个匹配分组搜索和进度发布
+│  ├─ bulk_matching.py        # 批量搜索、精确候选选择及确认
+│  ├─ bulk_rename.py          # 全部作品重命名预览和执行任务
+│  └─ getchu_descriptions.py  # Getchu 简介批量预览和写入任务
+├─ scrapers/                  # 外部元数据来源的统一接口与实现
+│  ├─ base.py                 # Candidate、SourceMetadata 和抓取器协议
+│  ├─ anidb.py                # AniDB 标题搜索与详情
+│  ├─ dmm.py                  # DMM/FANZA 搜索与详情
+│  └─ getchu.py               # Getchu 搜索与详情
+├─ matching.py                # 匹配业务层：候选搜索、人工选择、确认和刷新
+├─ scanner.py                 # 媒体目录扫描、哈希识别和待确认分组生成
+├─ parser.py                  # 文件名中的标题、年份和集号解析
+├─ media_ops.py               # 媒体绑定、重命名计划、复核、移动及回滚
+├─ exporter.py                # Jellyfin NFO 和图片等单作品输出
+├─ bulk_artifacts.py          # 全部作品 NFO/图片输出计划与执行
+├─ description_translation.py # 简介自动翻译
+├─ catalog_health.py          # 作品目录、NFO 和图片完整性检查
+├─ episode_numbers.py         # 集号格式化和排序规则
+├─ library_paths.py           # 媒体库路径边界判断
+├─ source_settings.py         # 数据源开关及默认设置
+├─ task_events.py             # 后台任务的 SSE 事件发布与订阅
+├─ queries.py                 # 作品和匹配分组的公共 SQLAlchemy 查询
+├─ models.py                  # SQLAlchemy 持久化模型
+├─ schemas.py                 # Pydantic 请求与响应模型
+├─ database.py                # 数据库引擎、Session 和请求依赖
+├─ config.py                  # 环境变量及运行配置
+└─ errors.py                  # 统一业务错误定义
 ```
 
-`main.py` 保持为轻量应用入口，启动命令仍为 `app.main:app`。新增接口时，HTTP 参数、依赖注入、状态码和响应模型放在对应的 `routers` 模块；跨多个模型、外部来源或后台任务的流程放在 `services` 或现有业务模块中，避免把业务编排重新堆回入口文件。
+`main.py` 保持为轻量应用入口，启动命令仍为 `app.main:app`。新增接口时，HTTP 参数、依赖注入、状态码和响应模型放在对应的 `routers` 模块；可被接口、定时任务和后台任务共同复用的领域逻辑放在顶层业务模块；耗时任务的状态维护、进度发布和跨模块流程放在 `services`。
+
+例如，`routers/matching.py` 只负责 `/api/match-groups` HTTP 契约；它直接调用顶层 `matching.py` 的候选选择和确认能力，候选搜索则先交给 `services/group_search.py` 维护后台任务和 SSE 进度，再调用 `matching.search_group()`。三者分别属于接口层、任务编排层和匹配业务层，不是重复实现。
 
 接口重构需要保持现有 URL 和 HTTP 方法。`backend/tests/test_api_routes.py` 会对 OpenAPI 操作集合进行契约检查，防止拆分或注册路由时遗漏接口。
 
